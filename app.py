@@ -1,9 +1,9 @@
 import io
 import pandas as pd
 import streamlit as st
-from optimizer import Settings, optimize, energy_arc_details
+from optimizer import Settings, optimize, energy_arc_details, energy_zone_labels, artist_spacing_stats
 
-st.set_page_config(page_title="SetFlow v0.6", page_icon="🎚️", layout="wide")
+st.set_page_config(page_title="SetFlow v0.7", page_icon="🎚️", layout="wide")
 
 st.markdown("""
 <style>
@@ -14,7 +14,7 @@ h1 {letter-spacing: -0.04em;}
 """, unsafe_allow_html=True)
 
 st.title("🎚️ SetFlow")
-st.caption("v0.6 • Mixing Brain + first Programming Brain: Energy Arc.")
+st.caption("v0.7 • Mixing Brain + Programming Brain: Energy Zones + stronger artist spacing.")
 
 uploaded = st.file_uploader("Upload a playlist", type=["xlsx", "xls", "csv"])
 
@@ -51,14 +51,14 @@ with st.sidebar:
 
     st.subheader("Programming Brain")
     energy_arc = st.selectbox(
-        "Energy Arc",
-        ["Party Arc", "Build", "Smooth", "Off"],
+        "Energy Programming",
+        ["Party Zones", "Build Zones", "Smooth", "Off"],
         index=0,
-        help="Shapes the whole set after BPM safety: Party Arc warms up, builds, peaks late, then eases down."
+        help="Programs broad sections of the set rather than forcing a rigid curve. Party Zones = warm-up → groove → build → peak → finish."
     )
     energy_arc_influence = st.slider(
-        "Energy Arc influence", 0, 50, 25, 5,
-        help="A soft whole-set preference. It cannot override BPM safety."
+        "Energy Zone influence", 0, 50, 25, 5,
+        help="A soft whole-set programming preference. It cannot override BPM safety or create artist collisions."
     ) / 100.0
     energy_mode = st.selectbox(
         "Adjacent-track energy behavior", ["Smooth", "Build"], index=0,
@@ -111,7 +111,7 @@ if uploaded:
     energy_num = pd.to_numeric(df["Energy"], errors="coerce")
     suspicious_energy = energy_num.isna() | (energy_num <= 0) | (energy_num > 100)
     if suspicious_energy.any():
-        st.info(f"{int(suspicious_energy.sum())} track(s) have missing/suspicious Energy values. SetFlow v0.5 treats those as neutral instead of literal zero.")
+        st.info(f"{int(suspicious_energy.sum())} track(s) have missing/suspicious Energy values. SetFlow treats those as neutral instead of literal zero.")
 
     if st.button("⚡ Optimize playlist", type="primary", width="stretch"):
         records = df.to_dict(orient="records")
@@ -145,6 +145,7 @@ if uploaded:
         out["Transition Quality"] = ["OPEN"] + [t["quality"] for t in transitions]
         out["Camelot Move"] = [None] + [t["camelot_relationship"] for t in transitions]
         out["Effective BPM Δ"] = [None] + [t["bpm_diff"] for t in transitions]
+        out["Program Zone"] = energy_zone_labels(ordered, settings)
 
         avg_score = sum(t["score"] for t in transitions) / max(len(transitions), 1)
         weak = sum(1 for t in transitions if t["score"] < min_target)
@@ -154,20 +155,22 @@ if uploaded:
         bpm_diffs = [t["bpm_diff"] for t in transitions if t["bpm_diff"] is not None]
         max_bpm_diff = max(bpm_diffs) if bpm_diffs else 0.0
         arc = energy_arc_details(ordered, settings)
+        adjacent_artist, near_artist = artist_spacing_stats(ordered)
 
         st.success("Optimization complete.")
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
         c1.metric("Average transition", f"{avg_score:.1f}/100")
         c2.metric("Great transitions", great)
         c3.metric("Weak transitions", weak)
         c4.metric("Hard BPM jumps", bad_bpm)
         c5.metric("Worst BPM Δ", f"{max_bpm_diff:.1f}")
-        c6.metric("Energy Arc", f"{arc['score']:.1f}/100")
+        c6.metric("Programming", f"{arc['score']:.1f}/100")
+        c7.metric("Artist collisions", adjacent_artist)
 
         if energy_arc != "Off":
             st.caption(
-                f"Energy Arc: start {arc['start']} • peak {arc['peak']} at track {arc.get('peak_position', '—')} "
-                f"• finish {arc['finish']} • mode: {energy_arc}"
+                f"Energy Program: start {arc['start']} • peak {arc['peak']} at track {arc.get('peak_position', '—')} "
+                f"• finish {arc['finish']} • mode: {energy_arc} • near artist repeats: {near_artist}"
             )
 
         if bad_bpm:
@@ -177,7 +180,7 @@ if uploaded:
 
         st.subheader("Optimized running order")
         show_cols = [
-            "SetFlow #", "Title", "Artist", "BPM", "Camelot Key", "Energy",
+            "SetFlow #", "Title", "Artist", "BPM", "Camelot Key", "Energy", "Program Zone",
             "Transition Score", "Transition Quality", "Transition Reason", "Effective BPM Δ"
         ]
         st.dataframe(out[show_cols], width="stretch", hide_index=True)
@@ -206,7 +209,7 @@ if uploaded:
         st.download_button(
             "Download optimized CSV",
             csv_bytes,
-            file_name="SetFlow_v0.6_optimized_playlist.csv",
+            file_name="SetFlow_v0.7_optimized_playlist.csv",
             mime="text/csv",
             width="stretch"
         )
@@ -217,19 +220,19 @@ if uploaded:
         st.download_button(
             "Download optimized Excel",
             xbuf.getvalue(),
-            file_name="SetFlow_v0.6_optimized_playlist.xlsx",
+            file_name="SetFlow_v0.7_optimized_playlist.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             width="stretch"
         )
 else:
     st.info("Upload the Salsa spreadsheet we built, or any CSV/XLSX with Title, Artist, BPM, Camelot Key, and Energy.")
     st.markdown("""
-**What changed in SetFlow v0.6**
+**What changed in SetFlow v0.7**
 
-- **Energy Arc:** SetFlow now has its first Programming Brain. The default Party Arc aims for warm-up → build → late peak → ease-down using the playlist's own Energy range.
-- **BPM safety still wins:** Energy programming is only allowed to refine routes that already satisfy the Mixing Brain. It cannot justify a tempo cliff.
-- **Energy Arc score:** the dashboard shows how closely the finished set follows the selected arc, plus start/peak/finish Energy.
-- **Separate controls:** adjacent-track Energy and whole-set Energy Arc are now independent.
-- The v0.5 BPM Bridge Planner, Camelot rules, BPM Escape, artist spacing, and worst-link protection all remain intact.
-- Danceability, Valence, and Popularity are deliberately still waiting; Energy is the first programming variable we are validating.
+- **Energy Zones:** Party programming now uses broad Warm-up → Groove → Build → Peak → Finish sections instead of forcing a mathematically smooth Energy curve.
+- **BPM safety still wins:** the v0.5 BPM Bridge Planner remains the foundation. Programming cannot create a hard tempo cliff.
+- **Stronger artist spacing:** back-to-back same-artist tracks are now a whole-set planning problem, not merely a small edge penalty. Near repeats are discouraged too.
+- **Programming score:** measures how well the finished route fits its selected Energy Zones while respecting mixability.
+- **Program Zone column:** every track shows the section of the night SetFlow is programming it for.
+- **Danceability, Valence, and Popularity remain intentionally off:** Energy gets validated first before we add more programming variables.
 """)

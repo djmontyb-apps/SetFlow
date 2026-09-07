@@ -19,9 +19,9 @@ class Settings:
     energy_influence: float = 0.15
     artist_spacing: float = 0.08
     energy_mode: str = "Smooth"   # Smooth | Build (adjacent-track behavior)
-    # v0.6 Programming Brain: shape the whole set using Energy metadata while
-    # keeping BPM safety lexicographically more important than programming.
-    energy_arc: str = "Party Arc"  # Off | Smooth | Build | Party Arc
+    # v0.7 Programming Brain: program the set in broad Energy Zones rather than
+    # forcing a mathematically smooth curve. BPM safety always has veto power.
+    energy_arc: str = "Party Zones"  # Off | Smooth | Build Zones | Party Zones
     energy_arc_influence: float = 0.25
     depth: str = "Standard"       # Quick | Standard | Deep
     lock_first: bool = False
@@ -300,48 +300,101 @@ def _quantile(sorted_vals, q):
     return float(sorted_vals[lo] * (1-f) + sorted_vals[hi] * f)
 
 
-def energy_arc_score(order, s):
-    """Score how well the whole running order follows the selected energy arc.
+def _energy_percentile(value, sorted_vals):
+    if not sorted_vals:
+        return 0.5
+    if len(sorted_vals) == 1:
+        return 0.5
+    # Mid-rank percentile is stable when duplicate Energy values are present.
+    below = sum(1 for v in sorted_vals if v < value)
+    equal = sum(1 for v in sorted_vals if v == value)
+    rank = below + max(0.0, (equal - 1) / 2.0)
+    return rank / max(len(sorted_vals) - 1, 1)
 
-    This is intentionally a *programming* score, not a transition-safety score.
-    It uses the playlist's own energy distribution, so a Salsa set and a House
-    set can both build naturally without hard-coded universal Energy numbers.
-    Missing/suspicious Energy values are filled with the playlist median.
+
+def energy_zone_for_position(index, n, mode="Party Zones"):
+    """Return (zone label, desired energy-percentile low, high).
+
+    Zones intentionally overlap. A real dance floor can breathe inside a section;
+    SetFlow only needs the *overall programming direction* to make sense.
     """
+    if n <= 1:
+        return "Open", 0.0, 1.0
+    x = index / max(n - 1, 1)
+    if mode == "Build Zones":
+        if x < 0.25:
+            return "Warm-up", 0.00, 0.45
+        if x < 0.55:
+            return "Groove", 0.25, 0.65
+        if x < 0.80:
+            return "Build", 0.45, 0.82
+        return "Peak", 0.68, 1.00
+    if mode == "Smooth":
+        if x < 0.33:
+            return "Groove", 0.20, 0.62
+        if x < 0.67:
+            return "Flow", 0.30, 0.72
+        return "Lift", 0.42, 0.84
+    # Party Zones: warm-up -> groove -> build -> peak -> finish.
+    if x < 0.18:
+        return "Warm-up", 0.00, 0.42
+    if x < 0.43:
+        return "Groove", 0.20, 0.62
+    if x < 0.68:
+        return "Build", 0.42, 0.80
+    if x < 0.88:
+        return "Peak", 0.68, 1.00
+    return "Finish", 0.38, 0.78
+
+
+def energy_zone_score(order, s):
     if len(order) < 2 or getattr(s, "energy_arc", "Off") == "Off":
         return 1.0
     vals, _ = _energy_values(order)
     sorted_vals = sorted(vals)
-    n = len(vals)
-    errors = []
-    mode = getattr(s, "energy_arc", "Party Arc")
-
+    penalties = []
     for i, actual in enumerate(vals):
-        x = i / max(n - 1, 1)
-        if mode == "Build":
-            # Low-ish opener to high-energy closer.
-            q = 0.20 + 0.75 * x
-        elif mode == "Smooth":
-            # Gentle rise through the night, avoiding a rigid climb.
-            q = 0.38 + 0.24 * x
-        else:  # Party Arc
-            # Warm-up -> steady build -> peak around 75% -> ease down to a
-            # still-positive finish. Piecewise quantile path, not fixed values.
-            if x <= 0.75:
-                q = 0.20 + (0.78 * (x / 0.75))
-            else:
-                q = 0.98 - (0.38 * ((x - 0.75) / 0.25))
-        target = _quantile(sorted_vals, q)
-        errors.append(abs(actual - target))
+        _, lo, hi = energy_zone_for_position(i, len(vals), getattr(s, "energy_arc", "Party Zones"))
+        p = _energy_percentile(actual, sorted_vals)
+        if lo <= p <= hi:
+            penalties.append(0.0)
+        else:
+            dist = lo - p if p < lo else p - hi
+            # Overlapping zones make a small miss cheap and a large miss obvious.
+            penalties.append(min(1.0, dist / 0.35))
+    return max(0.0, 1.0 - sum(penalties) / max(len(penalties), 1))
 
-    mae = sum(errors) / len(errors)
-    # 0 error = 1.0. A 25-point average miss is already a poor programming arc.
-    return max(0.0, 1.0 - mae / 25.0)
+
+def energy_zone_labels(order, s):
+    if getattr(s, "energy_arc", "Off") == "Off":
+        return ["Off"] * len(order)
+    return [energy_zone_for_position(i, len(order), getattr(s, "energy_arc", "Party Zones"))[0]
+            for i in range(len(order))]
+
+
+def artist_spacing_stats(order):
+    """Count artist collisions that matter to a live DJ set."""
+    artists = [str(t.get("Artist", "")).strip().lower() for t in order]
+    adjacent = 0
+    near = 0
+    for i, artist in enumerate(artists):
+        if not artist:
+            continue
+        if i + 1 < len(artists) and artists[i + 1] == artist:
+            adjacent += 1
+        if i + 2 < len(artists) and artists[i + 2] == artist:
+            near += 1
+    return adjacent, near
+
+
+def energy_arc_score(order, s):
+    """Compatibility wrapper: v0.7 scores broad programming zones."""
+    return energy_zone_score(order, s)
 
 
 def energy_arc_details(order, s):
     vals, had_missing = _energy_values(order)
-    score = energy_arc_score(order, s)
+    score = energy_zone_score(order, s)
     if not vals:
         return {"score": 100.0, "start": None, "peak": None, "finish": None, "missing": had_missing}
     peak_i = max(range(len(vals)), key=lambda i: vals[i])
@@ -352,6 +405,7 @@ def energy_arc_details(order, s):
         "peak_position": peak_i + 1,
         "finish": round(vals[-1], 1),
         "missing": had_missing,
+        "zones": energy_zone_labels(order, s),
     }
 
 
@@ -385,15 +439,16 @@ def objective(order, s):
         if pct < s.min_transition_target:
             weak += 1
             pain += (s.min_transition_target - pct) ** 2 / 25.0
-    # v0.6 lexicographic priority:
-    # catastrophic cliffs -> any guardrail violation -> weak links -> pain ->
-    # whole-set Energy Arc -> weakest edge -> total transition quality.
-    # Programming can improve a safe route, but it can never justify a BPM cliff.
-    arc = energy_arc_score(order, s)
+    # v0.7 lexicographic priority:
+    # catastrophic cliffs -> guardrail violations -> weak links -> adjacent artist
+    # collisions -> near artist repeats -> transition pain -> programming zones.
+    # This makes artist separation a real DJ rule while never outranking BPM safety.
+    adjacent_artist, near_artist = artist_spacing_stats(order)
+    arc = energy_zone_score(order, s)
     arc_weight = max(0.0, min(1.0, getattr(s, "energy_arc_influence", 0.25)))
     # Keep the arc term bounded so it refines rather than overwhelms mixing quality.
     programmed = arc * arc_weight + (sum(scores) / len(scores)) * (1.0 - arc_weight)
-    return (-severe, -hard, -weak, -pain, programmed, min(scores), sum(scores))
+    return (-severe, -hard, -weak, -adjacent_artist, -near_artist, -pain, programmed, min(scores), sum(scores))
 
 def _connectivity(tracks, idx, s):
     """How many tempo-practical neighbors does this track have? Lower = orphan."""
@@ -824,17 +879,17 @@ def _route_program_stats(order, s):
         "severe": severe, "hard": hard, "weak": weak,
         "avg": sum(scores)/max(len(scores),1),
         "minimum": min(scores) if scores else 100.0,
-        "arc": energy_arc_score(order, s) * 100.0,
+        "arc": energy_zone_score(order, s) * 100.0,
+        "adjacent_artist": artist_spacing_stats(order)[0],
+        "near_artist": artist_spacing_stats(order)[1],
     }
 
 
 def program_energy_arc(order, s):
-    """v0.6 post-pass: improve whole-set Energy without breaking mixability.
+    """v0.7 post-pass: improve Energy Zones without breaking the Mixing Brain.
 
-    The Mixing Brain gets veto power. We only accept programming moves that keep
-    the same counts of severe/hard/weak transitions, keep the average transition
-    within a small budget, and improve the selected Energy Arc. This is a very
-    DJ-like compromise: reshape the night *inside* safe BPM neighborhoods.
+    The route may breathe inside each section; we are programming broad phases,
+    not drawing a perfect line. Artist collisions are also protected here.
     """
     if getattr(s, "energy_arc", "Off") == "Off" or len(order) < 4:
         return list(order)
@@ -860,6 +915,30 @@ def program_energy_arc(order, s):
                 st = _route_program_stats(cand, s)
                 if (st["severe"], st["hard"], st["weak"]) != (base["severe"], base["hard"], base["weak"]):
                     continue
+                if st["adjacent_artist"] > base["adjacent_artist"] or st["near_artist"] > base["near_artist"]:
+                    continue
+                if st["avg"] < base["avg"] - loss_budget:
+                    continue
+                gain = (st["arc"] - base["arc"]) + 0.15 * (st["avg"] - base["avg"])
+                if gain > best_gain + 0.05:
+                    best_gain = gain
+                    best_move = (cand, st)
+
+        # Relocation can move one badly programmed track into the right section
+        # without requiring a perfect swap partner.
+        for i in range(lo, hi):
+            for j in range(lo, hi + 1):
+                if i == j or i + 1 == j:
+                    continue
+                cand = list(best)
+                tr = cand.pop(i)
+                dest = j if j < i else j - 1
+                cand.insert(max(lo, min(dest, len(cand))), tr)
+                st = _route_program_stats(cand, s)
+                if (st["severe"], st["hard"], st["weak"]) != (base["severe"], base["hard"], base["weak"]):
+                    continue
+                if st["adjacent_artist"] > base["adjacent_artist"] or st["near_artist"] > base["near_artist"]:
+                    continue
                 if st["avg"] < base["avg"] - loss_budget:
                     continue
                 gain = (st["arc"] - base["arc"]) + 0.15 * (st["avg"] - base["avg"])
@@ -870,6 +949,52 @@ def program_energy_arc(order, s):
         if best_move is None:
             break
         best, base = best_move
+    return best
+
+
+def rescue_artist_spacing(order, s):
+    """v0.7 final programming pass: eliminate avoidable artist collisions.
+
+    No move may worsen severe/hard BPM counts or weak-transition count. Within
+    that safe envelope, fewer adjacent repeats wins first, then fewer two-away
+    repeats, then transition average.
+    """
+    if len(order) < 4 or getattr(s, "artist_spacing", 0.0) <= 0:
+        return list(order)
+    best = list(order)
+    base = _route_program_stats(best, s)
+    n = len(best)
+    lo = 1 if s.lock_first else 0
+    hi = n - 1 if s.lock_last else n
+
+    for _ in range(5):
+        best_choice = None
+        best_key = (base["adjacent_artist"], base["near_artist"], -base["avg"])
+        # Try both relocations and swaps around the whole route.
+        for i in range(lo, hi):
+            for j in range(lo, hi + 1):
+                if i == j or i + 1 == j:
+                    continue
+                cand = list(best)
+                tr = cand.pop(i)
+                dest = j if j < i else j - 1
+                cand.insert(max(lo, min(dest, len(cand))), tr)
+                st = _route_program_stats(cand, s)
+                if st["severe"] > base["severe"] or st["hard"] > base["hard"] or st["weak"] > base["weak"]:
+                    continue
+                # Artist spacing can spend a modest amount of average score, but
+                # never enough to turn a workable link into a weak one.
+                if st["avg"] < base["avg"] - 2.0:
+                    continue
+                key = (st["adjacent_artist"], st["near_artist"], -st["avg"])
+                if key < best_key:
+                    best_key = key
+                    best_choice = (cand, st)
+        if best_choice is None:
+            break
+        best, base = best_choice
+        if base["adjacent_artist"] == 0 and base["near_artist"] == 0:
+            break
     return best
 
 
@@ -932,9 +1057,10 @@ def optimize(tracks, s: Settings):
     best = max(improved, key=lambda o: objective(o, s))
     # v0.3 rescue pass: explicitly repair the weakest links before finalizing.
     best = rescue_weak_links(best, s)
-    # v0.6 Programming Brain: reshape the safe route around the selected Energy
-    # Arc without re-introducing the BPM cliffs v0.5 eliminated.
+    # v0.7 Programming Brain: reshape the safe route into broad Energy Zones
+    # while preserving BPM safety and artist separation.
     best = program_energy_arc(best, s)
+    best = rescue_artist_spacing(best, s)
 
     transitions = []
     for i in range(len(best) - 1):
