@@ -10,7 +10,7 @@ from optimizer import (
     vibe_program_details,
 )
 
-st.set_page_config(page_title="SetFlow 1.0.1", page_icon="🎚️", layout="wide")
+st.set_page_config(page_title="SetFlow 1.1", page_icon="🎚️", layout="wide")
 
 st.markdown(
     """
@@ -80,7 +80,7 @@ def set_health(avg_score, weak, hard_bpm, max_bpm_diff, adjacent_artist, program
 
 
 with st.sidebar:
-    st.markdown("### 🎚️ SetFlow 1.0.1")
+    st.markdown("### 🎚️ SetFlow 1.1")
     st.caption("Whole-set DJ sequencing")
 
     mode = st.segmented_control("Preset", ["Smooth", "Balanced", "Harmonic"], default="Balanced")
@@ -363,7 +363,7 @@ if st.button("⚡ Build my SetFlow", type="primary", width="stretch"):
     d1.download_button(
         "Download CSV",
         csv_bytes,
-        file_name="SetFlow_v1.0_optimized_playlist.csv",
+        file_name="SetFlow_v1.1_optimized_playlist.csv",
         mime="text/csv",
         width="stretch",
     )
@@ -374,7 +374,7 @@ if st.button("⚡ Build my SetFlow", type="primary", width="stretch"):
     d2.download_button(
         "Download Excel",
         xbuf.getvalue(),
-        file_name="SetFlow_v1.0_optimized_playlist.xlsx",
+        file_name="SetFlow_v1.1_optimized_playlist.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         width="stretch",
     )

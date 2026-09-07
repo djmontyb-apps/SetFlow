@@ -28,7 +28,7 @@ Once the route is mixable, SetFlow shapes the playlist like a set.
 ### Vibe Polish
 Danceability and Valence are optional **tie-breakers**. They may choose between otherwise similar safe routes, but they cannot override BPM safety, Camelot logic, Energy Zones, or artist spacing.
 
-Popularity may be included in an input file and exported, but SetFlow 1.0 does not use it for sequencing.
+Popularity may be included in an input file and exported, but SetFlow 1.1 does not use it for sequencing.
 
 ## Playlist columns
 
@@ -108,7 +108,7 @@ For a GitHub/Streamlit update, replace the changed files, commit them, let Strea
 
 ## 1.0 status
 
-SetFlow 1.0 freezes the core architecture developed through the Salsa benchmark:
+SetFlow 1.1 freezes the core architecture developed through the Salsa benchmark:
 
 - tempo-safe BPM backbone
 - practical Camelot scoring
@@ -120,3 +120,8 @@ SetFlow 1.0 freezes the core architecture developed through the Salsa benchmark:
 - streamlined app layout and Set Health summary
 
 Future features should be added only if they improve real DJ workflow without compromising this foundation.
+
+
+## SetFlow 1.1
+
+Programming Brain refinement: adds an Artist Separation Guardrail and playlist-relative Energy Zone guardrails for Build/Peak. BPM safety remains the highest priority. Flexible column recognition from 1.0.1 is retained.

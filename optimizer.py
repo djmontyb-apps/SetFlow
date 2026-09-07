@@ -379,6 +379,29 @@ def energy_zone_labels(order, s):
             for i in range(len(order))]
 
 
+def energy_guardrail_stats(order, s):
+    """Count obvious programming-zone misses that should be avoidable.
+
+    v1.1 deliberately keeps this playlist-relative. Peak tracks should come from
+    roughly the stronger half of the crate; Build should avoid the very bottom.
+    Missing Energy remains neutral and BPM safety still outranks these counts.
+    """
+    if len(order) < 2 or getattr(s, "energy_arc", "Off") == "Off":
+        return {"peak_low": 0, "build_low": 0}
+    vals, _ = _energy_values(order)
+    sorted_vals = sorted(vals)
+    peak_low = 0
+    build_low = 0
+    for i, actual in enumerate(vals):
+        zone = energy_zone_for_position(i, len(vals), getattr(s, "energy_arc", "Party Zones"))[0]
+        pct = _energy_percentile(actual, sorted_vals)
+        if zone == "Peak" and pct < 0.52:
+            peak_low += 1
+        elif zone == "Build" and pct < 0.25:
+            build_low += 1
+    return {"peak_low": peak_low, "build_low": build_low}
+
+
 def artist_spacing_stats(order):
     """Count artist collisions that matter to a live DJ set."""
     artists = [str(t.get("Artist", "")).strip().lower() for t in order]
@@ -978,6 +1001,8 @@ def _route_program_stats(order, s):
         "vibe": vibe_program_score(order, s) * 100.0,
         "adjacent_artist": artist_spacing_stats(order)[0],
         "near_artist": artist_spacing_stats(order)[1],
+        "peak_low": energy_guardrail_stats(order, s)["peak_low"],
+        "build_low": energy_guardrail_stats(order, s)["build_low"],
     }
 
 
@@ -1049,11 +1074,11 @@ def program_energy_arc(order, s):
 
 
 def rescue_artist_spacing(order, s):
-    """Final programming pass: eliminate avoidable artist collisions.
+    """v1.1 Artist Separation Guardrail.
 
-    No move may worsen severe/hard BPM counts or weak-transition count. Within
-    that safe envelope, fewer adjacent repeats wins first, then fewer two-away
-    repeats, then transition average.
+    Adjacent same-artist tracks are treated as a last resort. A relocation/swap
+    may trade a little average transition quality or create a two-away repeat,
+    but it may never add a hard BPM jump or a weak transition.
     """
     if len(order) < 4 or getattr(s, "artist_spacing", 0.0) <= 0:
         return list(order)
@@ -1063,11 +1088,16 @@ def rescue_artist_spacing(order, s):
     lo = 1 if s.lock_first else 0
     hi = n - 1 if s.lock_last else n
 
-    for _ in range(5):
-        best_choice = None
-        best_key = (base["adjacent_artist"], base["near_artist"], -base["avg"])
-        # Try both relocations and swaps around the whole route.
+    for _ in range(8):
+        choice = None
+        # Adjacent collisions dominate; near repeats are secondary.
+        best_key = (base["adjacent_artist"], base["near_artist"], -base["minimum"], -base["avg"])
+        candidates = []
         for i in range(lo, hi):
+            for j in range(i + 1, hi):
+                cand = list(best)
+                cand[i], cand[j] = cand[j], cand[i]
+                candidates.append(cand)
             for j in range(lo, hi + 1):
                 if i == j or i + 1 == j:
                     continue
@@ -1075,24 +1105,73 @@ def rescue_artist_spacing(order, s):
                 tr = cand.pop(i)
                 dest = j if j < i else j - 1
                 cand.insert(max(lo, min(dest, len(cand))), tr)
-                st = _route_program_stats(cand, s)
-                if st["severe"] > base["severe"] or st["hard"] > base["hard"] or st["weak"] > base["weak"]:
+                candidates.append(cand)
+
+        for cand in candidates:
+            st = _route_program_stats(cand, s)
+            if st["severe"] > base["severe"] or st["hard"] > base["hard"] or st["weak"] > base["weak"]:
+                continue
+            # If we remove an adjacent collision, permit a modest quality spend
+            # and do not require near-repeat count to improve simultaneously.
+            adj_gain = base["adjacent_artist"] - st["adjacent_artist"]
+            if adj_gain > 0:
+                if st["avg"] < base["avg"] - 3.0:
                     continue
-                # Artist spacing can spend a modest amount of average score, but
-                # never enough to turn a workable link into a weak one.
-                if st["avg"] < base["avg"] - 2.0:
+                key = (st["adjacent_artist"], st["near_artist"], -st["minimum"], -st["avg"])
+            else:
+                if st["avg"] < base["avg"] - 1.5:
                     continue
-                key = (st["adjacent_artist"], st["near_artist"], -st["avg"])
-                if key < best_key:
-                    best_key = key
-                    best_choice = (cand, st)
-        if best_choice is None:
+                key = (st["adjacent_artist"], st["near_artist"], -st["minimum"], -st["avg"])
+            if key < best_key:
+                best_key = key
+                choice = (cand, st)
+        if choice is None:
             break
-        best, base = best_choice
+        best, base = choice
         if base["adjacent_artist"] == 0 and base["near_artist"] == 0:
             break
     return best
 
+
+def enforce_energy_zone_guardrails(order, s):
+    """v1.1 Programming Brain guardrail for Build/Peak placement.
+
+    Search for safe swaps/relocations that remove obviously low-energy Peak
+    tracks (and bottom-quartile Build tracks). Safety is non-negotiable: no new
+    severe/hard BPM jump, weak link, or adjacent artist collision is allowed.
+    """
+    if len(order) < 5 or getattr(s, "energy_arc", "Off") == "Off":
+        return list(order)
+    best = list(order)
+    base = _route_program_stats(best, s)
+    lo = 1 if s.lock_first else 0
+    hi = len(best) - 1 if s.lock_last else len(best)
+    passes = 2 if s.depth == "Quick" else (5 if s.depth == "Standard" else 8)
+
+    for _ in range(passes):
+        choice = None
+        best_key = (-base["peak_low"], -base["build_low"], base["arc"], base["minimum"], base["avg"])
+        for i in range(lo, hi):
+            for j in range(i + 1, hi):
+                cand = list(best)
+                cand[i], cand[j] = cand[j], cand[i]
+                st = _route_program_stats(cand, s)
+                if st["severe"] > base["severe"] or st["hard"] > base["hard"] or st["weak"] > base["weak"]:
+                    continue
+                if st["adjacent_artist"] > base["adjacent_artist"]:
+                    continue
+                if st["avg"] < base["avg"] - 1.75 or st["minimum"] < base["minimum"] - 2.0:
+                    continue
+                key = (-st["peak_low"], -st["build_low"], st["arc"], st["minimum"], st["avg"])
+                if key > best_key:
+                    best_key = key
+                    choice = (cand, st)
+        if choice is None:
+            break
+        best, base = choice
+        if base["peak_low"] == 0 and base["build_low"] == 0:
+            break
+    return best
 
 
 def polish_vibe_tiebreak(order, s):
@@ -1309,11 +1388,15 @@ def optimize(tracks, s: Settings):
     # while preserving BPM safety and artist separation.
     best = program_energy_arc(best, s)
     best = rescue_artist_spacing(best, s)
+    best = enforce_energy_zone_guardrails(best, s)
     # Only after the route is safe, programmed, and artist-clean do
     # Danceability + Valence get to break near-ties.
     best = polish_vibe_tiebreak(best, s)
-    # v1.0 cleanup: make one last conservative attempt to lift weak links.
+    # Keep the proven v1 weak-link cleanup, then re-assert the two v1.1
+    # programming guardrails so cleanup cannot quietly undo them.
     best = polish_weak_transitions(best, s)
+    best = rescue_artist_spacing(best, s)
+    best = enforce_energy_zone_guardrails(best, s)
 
     transitions = []
     for i in range(len(best) - 1):
