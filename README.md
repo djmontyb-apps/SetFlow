@@ -1,4 +1,4 @@
-# SetFlow 1.0
+# SetFlow 1.1
 
 **SetFlow** is a DJ playlist sequencing tool that turns a crate or playlist into a more performance-ready running order using BPM, Camelot key, Energy, artist spacing, and optional vibe metadata.
 
