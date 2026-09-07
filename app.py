@@ -3,7 +3,7 @@ import pandas as pd
 import streamlit as st
 from optimizer import Settings, optimize
 
-st.set_page_config(page_title="SetFlow v0.2", page_icon="🎚️", layout="wide")
+st.set_page_config(page_title="SetFlow v0.3", page_icon="🎚️", layout="wide")
 
 st.markdown("""
 <style>
@@ -14,7 +14,7 @@ h1 {letter-spacing: -0.04em;}
 """, unsafe_allow_html=True)
 
 st.title("🎚️ SetFlow")
-st.caption("v0.2 • Mixable first. Harmonic second. Make the whole set flow.")
+st.caption("v0.3 • Mixable first. Harmonic second. Make the whole set flow.")
 
 uploaded = st.file_uploader("Upload a playlist", type=["xlsx", "xls", "csv"])
 
@@ -87,7 +87,7 @@ if uploaded:
 
     st.subheader("Playlist")
     st.caption(f"{len(df)} tracks loaded")
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
 
     invalid_keys = ~df["Camelot Key"].astype(str).str.upper().str.match(r"^(1[0-2]|[1-9])[AB]$")
     if invalid_keys.any():
@@ -96,9 +96,9 @@ if uploaded:
     energy_num = pd.to_numeric(df["Energy"], errors="coerce")
     suspicious_energy = energy_num.isna() | (energy_num <= 0) | (energy_num > 100)
     if suspicious_energy.any():
-        st.info(f"{int(suspicious_energy.sum())} track(s) have missing/suspicious Energy values. SetFlow v0.2 treats those as neutral instead of literal zero.")
+        st.info(f"{int(suspicious_energy.sum())} track(s) have missing/suspicious Energy values. SetFlow v0.3 treats those as neutral instead of literal zero.")
 
-    if st.button("⚡ Optimize playlist", type="primary", use_container_width=True):
+    if st.button("⚡ Optimize playlist", type="primary", width="stretch"):
         records = df.to_dict(orient="records")
         settings = Settings(
             key_weight=key_pct / 100.0,
@@ -150,7 +150,7 @@ if uploaded:
             "SetFlow #", "Title", "Artist", "BPM", "Camelot Key", "Energy",
             "Transition Score", "Transition Reason", "Effective BPM Δ"
         ]
-        st.dataframe(out[show_cols], use_container_width=True, hide_index=True)
+        st.dataframe(out[show_cols], width="stretch", hide_index=True)
 
         with st.expander("Transition details"):
             detail_rows = []
@@ -169,15 +169,15 @@ if uploaded:
                     "Energy score": t["energy_score"],
                     "Same artist": t["same_artist"],
                 })
-            st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(detail_rows), width="stretch", hide_index=True)
 
         csv_bytes = out.to_csv(index=False).encode("utf-8")
         st.download_button(
             "Download optimized CSV",
             csv_bytes,
-            file_name="SetFlow_v0.2_optimized_playlist.csv",
+            file_name="SetFlow_v0.3_optimized_playlist.csv",
             mime="text/csv",
-            use_container_width=True
+            width="stretch"
         )
 
         xbuf = io.BytesIO()
@@ -186,19 +186,19 @@ if uploaded:
         st.download_button(
             "Download optimized Excel",
             xbuf.getvalue(),
-            file_name="SetFlow_v0.2_optimized_playlist.xlsx",
+            file_name="SetFlow_v0.3_optimized_playlist.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
+            width="stretch"
         )
 else:
     st.info("Upload the Salsa spreadsheet we built, or any CSV/XLSX with Title, Artist, BPM, Camelot Key, and Energy.")
     st.markdown("""
-**What changed in SetFlow v0.2**
+**What changed in SetFlow v0.3**
 
-- BPM is now a practical guardrail — a perfect key match cannot rescue a ridiculous tempo jump.
-- Camelot rules include same key, relative A/B, ±1, ±2 energy moves, and ±7 dramatic moves.
-- BPM Escape Mode allows a key break when tempo placement makes more DJ sense.
-- Whole-set optimization actively tries to keep difficult tracks from becoming leftovers at the end.
+- **Anti-garbage-pile rescue:** SetFlow targets the weakest transitions and tries moving those tracks earlier into better BPM neighborhoods.
+- **Worst-link-first scoring:** one disastrous transition now hurts more than several small score improvements can help.
+- BPM remains the practical guardrail; Camelot harmony is optimized inside a mixable tempo zone.
+- BPM Escape Mode deliberately breaks key when that produces a more DJ-friendly tempo transition.
 - Missing or zero Energy metadata is treated as neutral.
 - Every transition explains *why* SetFlow chose it.
 """)

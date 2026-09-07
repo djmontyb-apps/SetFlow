@@ -23,6 +23,8 @@ class Settings:
     lock_first: bool = False
     lock_last: bool = False
     seed: int = 42
+    # v0.3: whole-set rescue controls. Bad links matter more than small average gains.
+    rescue_passes: int = 4
 
 
 def parse_camelot(value):
@@ -263,22 +265,31 @@ def _edge(order, i, j, s):
 
 
 def objective(order, s):
-    """Lexicographic whole-set objective: avoid disasters before chasing average."""
+    """v0.3 whole-set objective: protect the weakest links first.
+
+    A route with one disastrous transition should lose to a route with slightly
+    lower average scores but no disaster. This is the anti-garbage-pile rule.
+    """
     if len(order) < 2:
-        return (0, 0, 0.0, 0.0)
+        return (0, 0, 0.0, 0.0, 0.0)
     scores = []
     severe = 0
     weak = 0
+    pain = 0.0
     for i in range(len(order) - 1):
         sc, d = transition_score(order[i], order[i + 1], s)
         pct = sc * 100
         scores.append(sc)
-        if d["bpm_diff"] is not None and d["bpm_diff"] > s.bpm_guardrail + 4:
+        bpm_diff = d["bpm_diff"]
+        if bpm_diff is not None and bpm_diff > s.bpm_guardrail + 4:
             severe += 1
+            # Extra pain for truly absurd tempo jumps.
+            pain += (bpm_diff - (s.bpm_guardrail + 4)) ** 2
         if pct < s.min_transition_target:
             weak += 1
-    return (-severe, -weak, min(scores), sum(scores))
-
+            pain += (s.min_transition_target - pct) ** 2 / 25.0
+    # Lexicographic: severe jumps -> weak links -> pain -> weakest edge -> total.
+    return (-severe, -weak, -pain, min(scores), sum(scores))
 
 def _connectivity(tracks, idx, s):
     """How many tempo-practical neighbors does this track have? Lower = orphan."""
@@ -443,6 +454,78 @@ def improve_local(order, s, iterations=1000):
     return best
 
 
+def rescue_weak_links(order, s):
+    """Target the worst transitions with deterministic relocate/reverse moves.
+
+    v0.2 could still optimize itself into a corner. v0.3 repeatedly identifies
+    the weakest edge and tries moving either endpoint into every legal position.
+    It also tries short segment reversals. Only whole-set improvements survive.
+    """
+    best = list(order)
+    best_obj = objective(best, s)
+    n = len(best)
+    if n < 4:
+        return best
+
+    for _ in range(max(1, s.rescue_passes)):
+        edge_info = []
+        for i in range(n - 1):
+            sc, d = transition_score(best[i], best[i + 1], s)
+            bpm = d["bpm_diff"] if d["bpm_diff"] is not None else 0
+            severity = (1 if bpm > s.bpm_guardrail + 4 else 0, -sc, bpm)
+            edge_info.append((severity, i))
+        # Work on several worst edges, not only the single worst one.
+        worst_edges = [i for _, i in sorted(edge_info, reverse=True)[:min(6, len(edge_info))]]
+        improved = False
+
+        for edge_i in worst_edges:
+            endpoints = [edge_i, edge_i + 1]
+            for src in endpoints:
+                if (s.lock_first and src == 0) or (s.lock_last and src == n - 1):
+                    continue
+                for dest in range(n):
+                    if dest == src:
+                        continue
+                    if s.lock_first and dest == 0:
+                        continue
+                    if s.lock_last and dest >= n - 1:
+                        continue
+                    cand = list(best)
+                    tr = cand.pop(src)
+                    # dest is interpreted in the post-pop list.
+                    dest2 = min(dest, len(cand))
+                    cand.insert(dest2, tr)
+                    obj = objective(cand, s)
+                    if obj > best_obj:
+                        best, best_obj = cand, obj
+                        improved = True
+                        break
+                if improved:
+                    break
+            if improved:
+                break
+
+        if improved:
+            continue
+
+        # If relocation stalls, try reversing modest route segments.
+        lo = 1 if s.lock_first else 0
+        hi = n - 1 if s.lock_last else n
+        for i in range(lo, hi - 2):
+            for j in range(i + 2, min(hi, i + 10)):
+                cand = best[:i] + list(reversed(best[i:j + 1])) + best[j + 1:]
+                obj = objective(cand, s)
+                if obj > best_obj:
+                    best, best_obj = cand, obj
+                    improved = True
+                    break
+            if improved:
+                break
+        if not improved:
+            break
+    return best
+
+
 def _mark_escape_reasons(order, transitions, s):
     """Label key-breaking but tempo-practical links as BPM Escape when appropriate."""
     if not s.escape_mode:
@@ -498,6 +581,8 @@ def optimize(tracks, s: Settings):
         s.seed = old_seed
 
     best = max(improved, key=lambda o: objective(o, s))
+    # v0.3 rescue pass: explicitly repair the weakest links before finalizing.
+    best = rescue_weak_links(best, s)
 
     transitions = []
     for i in range(len(best) - 1):
