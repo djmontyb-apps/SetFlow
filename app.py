@@ -1,10 +1,9 @@
-
 import io
 import pandas as pd
 import streamlit as st
 from optimizer import Settings, optimize
 
-st.set_page_config(page_title="SetFlow", page_icon="🎚️", layout="wide")
+st.set_page_config(page_title="SetFlow v0.2", page_icon="🎚️", layout="wide")
 
 st.markdown("""
 <style>
@@ -15,12 +14,12 @@ h1 {letter-spacing: -0.04em;}
 """, unsafe_allow_html=True)
 
 st.title("🎚️ SetFlow")
-st.caption("DJ playlist ordering by Camelot key, BPM, energy flow, and artist spacing.")
+st.caption("v0.2 • Mixable first. Harmonic second. Make the whole set flow.")
 
 uploaded = st.file_uploader("Upload a playlist", type=["xlsx", "xls", "csv"])
 
 with st.sidebar:
-    st.header("Harmonize settings")
+    st.header("SetFlow settings")
     mode = st.segmented_control(
         "Preset",
         ["Smooth", "Balanced", "Harmonic"],
@@ -34,13 +33,21 @@ with st.sidebar:
     }
     kw, bw = defaults.get(mode, (0.60, 0.40))
 
-    key_pct = st.slider("Key priority", 0, 100, int(kw*100), 5)
+    key_pct = st.slider("Key preference", 0, 100, int(kw * 100), 5,
+                        help="BPM guardrails still apply even at high Key preference.")
     bpm_pct = 100 - key_pct
-    st.caption(f"Key {key_pct}%  •  BPM {bpm_pct}%")
+    st.caption(f"Inside a mixable BPM zone: Key {key_pct}% • BPM {bpm_pct}%")
 
-    bpm_tolerance = st.slider("BPM tolerance", 1, 12, 4, 1)
+    st.subheader("DJ Safety")
+    bpm_tolerance = st.slider("Ideal BPM tolerance", 1, 12, 4, 1)
+    bpm_guardrail = st.slider("BPM guardrail", 5, 16, 8, 1,
+                              help="Beyond this, harmonic key cannot rescue a big tempo jump.")
     half_double = st.checkbox("Allow half / double tempo matches", value=True)
+    escape_mode = st.checkbox("BPM Escape Mode", value=True,
+                              help="When harmony is awkward, place the track where tempo makes practical DJ sense.")
+    min_target = st.slider("Minimum transition target", 40, 80, 60, 5)
 
+    st.subheader("Flow")
     energy_mode = st.selectbox("Energy flow", ["Smooth", "Build"], index=0)
     energy_influence = st.slider("Energy influence", 0, 40, 15, 5) / 100.0
 
@@ -49,17 +56,19 @@ with st.sidebar:
         options=["Off", "Light", "Normal", "Strong"],
         value="Normal"
     )
-    artist_penalty = {"Off":0.0, "Light":0.04, "Normal":0.08, "Strong":0.14}[artist_rule]
+    artist_penalty = {"Off": 0.0, "Light": 0.04, "Normal": 0.08, "Strong": 0.14}[artist_rule]
 
     depth = st.selectbox("Optimization depth", ["Quick", "Standard", "Deep"], index=1)
     lock_first = st.checkbox("Lock first track", value=False)
     lock_last = st.checkbox("Lock last track", value=False)
+
 
 def load_playlist(file):
     name = file.name.lower()
     if name.endswith(".csv"):
         return pd.read_csv(file)
     return pd.read_excel(file)
+
 
 required = ["Title", "Artist", "BPM", "Camelot Key", "Energy"]
 
@@ -77,19 +86,28 @@ if uploaded:
         st.stop()
 
     st.subheader("Playlist")
+    st.caption(f"{len(df)} tracks loaded")
     st.dataframe(df, use_container_width=True, hide_index=True)
 
     invalid_keys = ~df["Camelot Key"].astype(str).str.upper().str.match(r"^(1[0-2]|[1-9])[AB]$")
     if invalid_keys.any():
-        st.warning(f"{int(invalid_keys.sum())} track(s) have missing or invalid Camelot keys. They can still be optimized, but key scoring will be neutral.")
+        st.warning(f"{int(invalid_keys.sum())} track(s) have missing or invalid Camelot keys. Key scoring will be neutral for those tracks.")
+
+    energy_num = pd.to_numeric(df["Energy"], errors="coerce")
+    suspicious_energy = energy_num.isna() | (energy_num <= 0) | (energy_num > 100)
+    if suspicious_energy.any():
+        st.info(f"{int(suspicious_energy.sum())} track(s) have missing/suspicious Energy values. SetFlow v0.2 treats those as neutral instead of literal zero.")
 
     if st.button("⚡ Optimize playlist", type="primary", use_container_width=True):
         records = df.to_dict(orient="records")
         settings = Settings(
-            key_weight=key_pct/100.0,
-            bpm_weight=bpm_pct/100.0,
+            key_weight=key_pct / 100.0,
+            bpm_weight=bpm_pct / 100.0,
             bpm_tolerance=float(bpm_tolerance),
+            bpm_guardrail=float(bpm_guardrail),
             allow_half_double=half_double,
+            escape_mode=escape_mode,
+            min_transition_target=float(min_target),
             energy_influence=energy_influence,
             artist_spacing=artist_penalty,
             energy_mode=energy_mode,
@@ -98,33 +116,40 @@ if uploaded:
             lock_last=lock_last,
         )
 
-        ordered, transitions = optimize(records, settings)
-        out = pd.DataFrame(ordered).copy()
-        out.insert(0, "SetFlow #", range(1, len(out)+1))
+        with st.spinner("SetFlow is building the best whole-set route…"):
+            ordered, transitions = optimize(records, settings)
 
-        # Transition information belongs to the destination track.
-        scores = [None] + [t["score"] for t in transitions]
-        key_scores = [None] + [t["key_score"] for t in transitions]
-        bpm_scores = [None] + [t["bpm_score"] for t in transitions]
-        bpm_diffs = [None] + [t["bpm_diff"] for t in transitions]
-        out["Transition Score"] = scores
-        out["Key Score"] = key_scores
-        out["BPM Score"] = bpm_scores
-        out["Effective BPM Δ"] = bpm_diffs
+        out = pd.DataFrame(ordered).copy()
+        out.insert(0, "SetFlow #", range(1, len(out) + 1))
+
+        out["Transition Score"] = [None] + [t["score"] for t in transitions]
+        out["Transition Reason"] = ["OPEN"] + [t["reason"] for t in transitions]
+        out["Camelot Move"] = [None] + [t["camelot_relationship"] for t in transitions]
+        out["Effective BPM Δ"] = [None] + [t["bpm_diff"] for t in transitions]
 
         avg_score = sum(t["score"] for t in transitions) / max(len(transitions), 1)
-        weak = sum(1 for t in transitions if t["score"] < 60)
+        weak = sum(1 for t in transitions if t["score"] < min_target)
         great = sum(1 for t in transitions if t["score"] >= 85)
+        escapes = sum(1 for t in transitions if t["reason"] == "BPM Escape")
+        bad_bpm = sum(1 for t in transitions if t["bpm_zone"] in ("Hard BPM Jump", "BPM Incompatible"))
 
         st.success("Optimization complete.")
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Average transition", f"{avg_score:.1f}/100")
         c2.metric("Great transitions", great)
         c3.metric("Weak transitions", weak)
+        c4.metric("BPM Escapes", escapes)
+
+        if bad_bpm:
+            st.warning(f"SetFlow found {bad_bpm} unavoidable hard BPM transition(s). Check the transition details before performing the set.")
+        elif weak == 0:
+            st.info("No transitions fell below your minimum target. Nice route.")
 
         st.subheader("Optimized running order")
-        show_cols = ["SetFlow #", "Title", "Artist", "BPM", "Camelot Key", "Energy",
-                     "Transition Score", "Effective BPM Δ"]
+        show_cols = [
+            "SetFlow #", "Title", "Artist", "BPM", "Camelot Key", "Energy",
+            "Transition Score", "Transition Reason", "Effective BPM Δ"
+        ]
         st.dataframe(out[show_cols], use_container_width=True, hide_index=True)
 
         with st.expander("Transition details"):
@@ -132,12 +157,16 @@ if uploaded:
             for i, t in enumerate(transitions):
                 detail_rows.append({
                     "From": ordered[i]["Title"],
-                    "To": ordered[i+1]["Title"],
+                    "To": ordered[i + 1]["Title"],
                     "Score": t["score"],
-                    "Key": t["key_score"],
-                    "BPM": t["bpm_score"],
-                    "Energy": t["energy_score"],
-                    "BPM Δ": t["bpm_diff"],
+                    "Reason": t["reason"],
+                    "Camelot move": t["camelot_relationship"],
+                    "BPM zone": t["bpm_zone"],
+                    "Tempo mode": t["tempo_mode"],
+                    "Effective BPM Δ": t["bpm_diff"],
+                    "Key score": t["key_score"],
+                    "BPM score": t["bpm_score"],
+                    "Energy score": t["energy_score"],
                     "Same artist": t["same_artist"],
                 })
             st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
@@ -146,7 +175,7 @@ if uploaded:
         st.download_button(
             "Download optimized CSV",
             csv_bytes,
-            file_name="SetFlow_optimized_playlist.csv",
+            file_name="SetFlow_v0.2_optimized_playlist.csv",
             mime="text/csv",
             use_container_width=True
         )
@@ -157,19 +186,19 @@ if uploaded:
         st.download_button(
             "Download optimized Excel",
             xbuf.getvalue(),
-            file_name="SetFlow_optimized_playlist.xlsx",
+            file_name="SetFlow_v0.2_optimized_playlist.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
 else:
     st.info("Upload the Salsa spreadsheet we built, or any CSV/XLSX with Title, Artist, BPM, Camelot Key, and Energy.")
     st.markdown("""
-**SetFlow v0.1 workflow**
+**What changed in SetFlow v0.2**
 
-1. Build or transfer your playlist.
-2. Add Camelot keys from djay Pro / Mixed In Key.
-3. Upload the spreadsheet.
-4. Choose BPM vs Key priority and tolerance.
-5. Optimize.
-6. Export the running order.
+- BPM is now a practical guardrail — a perfect key match cannot rescue a ridiculous tempo jump.
+- Camelot rules include same key, relative A/B, ±1, ±2 energy moves, and ±7 dramatic moves.
+- BPM Escape Mode allows a key break when tempo placement makes more DJ sense.
+- Whole-set optimization actively tries to keep difficult tracks from becoming leftovers at the end.
+- Missing or zero Energy metadata is treated as neutral.
+- Every transition explains *why* SetFlow chose it.
 """)
