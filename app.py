@@ -3,7 +3,7 @@ import pandas as pd
 import streamlit as st
 from optimizer import Settings, optimize
 
-st.set_page_config(page_title="SetFlow v0.4", page_icon="🎚️", layout="wide")
+st.set_page_config(page_title="SetFlow v0.5", page_icon="🎚️", layout="wide")
 
 st.markdown("""
 <style>
@@ -14,7 +14,7 @@ h1 {letter-spacing: -0.04em;}
 """, unsafe_allow_html=True)
 
 st.title("🎚️ SetFlow")
-st.caption("v0.4 • Mixable first. Harmonic second. Make the whole set flow.")
+st.caption("v0.5 • BPM spine first. Harmonic intelligence on top.")
 
 uploaded = st.file_uploader("Upload a playlist", type=["xlsx", "xls", "csv"])
 
@@ -45,6 +45,8 @@ with st.sidebar:
     half_double = st.checkbox("Allow half / double tempo matches", value=True)
     escape_mode = st.checkbox("BPM Escape Mode", value=True,
                               help="When harmony is awkward, place the track where tempo makes practical DJ sense.")
+    bpm_spine = st.checkbox("BPM Bridge Planner", value=True,
+                            help="Build a tempo-safe backbone first so bridge tracks are not spent too early.")
     min_target = st.slider("Minimum transition target", 40, 80, 60, 5)
 
     st.subheader("Flow")
@@ -96,7 +98,7 @@ if uploaded:
     energy_num = pd.to_numeric(df["Energy"], errors="coerce")
     suspicious_energy = energy_num.isna() | (energy_num <= 0) | (energy_num > 100)
     if suspicious_energy.any():
-        st.info(f"{int(suspicious_energy.sum())} track(s) have missing/suspicious Energy values. SetFlow v0.4 treats those as neutral instead of literal zero.")
+        st.info(f"{int(suspicious_energy.sum())} track(s) have missing/suspicious Energy values. SetFlow v0.5 treats those as neutral instead of literal zero.")
 
     if st.button("⚡ Optimize playlist", type="primary", width="stretch"):
         records = df.to_dict(orient="records")
@@ -107,6 +109,7 @@ if uploaded:
             bpm_guardrail=float(bpm_guardrail),
             allow_half_double=half_double,
             escape_mode=escape_mode,
+            bpm_spine=bpm_spine,
             min_transition_target=float(min_target),
             energy_influence=energy_influence,
             artist_spacing=artist_penalty,
@@ -133,13 +136,16 @@ if uploaded:
         great = sum(1 for t in transitions if t["score"] >= 85)
         escapes = sum(1 for t in transitions if t["reason"] == "BPM Escape")
         bad_bpm = sum(1 for t in transitions if t["bpm_zone"] in ("Hard BPM Jump", "BPM Incompatible"))
+        bpm_diffs = [t["bpm_diff"] for t in transitions if t["bpm_diff"] is not None]
+        max_bpm_diff = max(bpm_diffs) if bpm_diffs else 0.0
 
         st.success("Optimization complete.")
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Average transition", f"{avg_score:.1f}/100")
         c2.metric("Great transitions", great)
         c3.metric("Weak transitions", weak)
-        c4.metric("BPM Escapes", escapes)
+        c4.metric("Hard BPM jumps", bad_bpm)
+        c5.metric("Worst BPM Δ", f"{max_bpm_diff:.1f}")
 
         if bad_bpm:
             st.warning(f"SetFlow found {bad_bpm} unavoidable hard BPM transition(s). Check the transition details before performing the set.")
@@ -177,7 +183,7 @@ if uploaded:
         st.download_button(
             "Download optimized CSV",
             csv_bytes,
-            file_name="SetFlow_v0.4_optimized_playlist.csv",
+            file_name="SetFlow_v0.5_optimized_playlist.csv",
             mime="text/csv",
             width="stretch"
         )
@@ -188,19 +194,19 @@ if uploaded:
         st.download_button(
             "Download optimized Excel",
             xbuf.getvalue(),
-            file_name="SetFlow_v0.4_optimized_playlist.xlsx",
+            file_name="SetFlow_v0.5_optimized_playlist.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             width="stretch"
         )
 else:
     st.info("Upload the Salsa spreadsheet we built, or any CSV/XLSX with Title, Artist, BPM, Camelot Key, and Energy.")
     st.markdown("""
-**What changed in SetFlow v0.4**
+**What changed in SetFlow v0.5**
 
-- **Anti-garbage-pile rescue:** SetFlow targets the weakest transitions and tries moving those tracks earlier into better BPM neighborhoods.
-- **Worst-link-first scoring:** one disastrous transition now hurts more than several small score improvements can help.
-- BPM remains the practical guardrail; Camelot harmony is optimized inside a mixable tempo zone.
-- BPM Escape Mode deliberately breaks key when that produces a more DJ-friendly tempo transition.
-- Missing or zero Energy metadata is treated as neutral.
-- Every transition explains *why* SetFlow chose it.
+- **BPM Bridge Planner:** SetFlow now builds a tempo-safe spine before harmonic polishing, protecting the tracks that connect one BPM neighborhood to another.
+- **No-cliff candidate:** the optimizer always considers a route based on practical normalized BPM geography, including true half/double-time tracks.
+- **Worst-link-first scoring remains:** one disastrous transition matters more than several tiny harmonic gains.
+- Camelot harmony, energy, artist spacing, and BPM Escape still optimize the route once the tempo backbone is safe.
+- The dashboard now shows **Hard BPM jumps** and **Worst BPM Δ** so a bad route cannot hide behind a good average score.
+- Energy Arc is intentionally *not* in this release yet; v0.5 is focused on solving the remaining BPM-island problem cleanly.
 """)

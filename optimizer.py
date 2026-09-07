@@ -27,6 +27,10 @@ class Settings:
     rescue_passes: int = 6
     # v0.4: plan around tempo outliers before building the easy middle.
     anchor_neighbor_count: int = 2
+    # v0.5: build a BPM spine candidate so tempo islands are connected before
+    # harmonic optimization. This prevents the optimizer from spending every
+    # useful bridge and leaving a 15-40 BPM cliff near the end.
+    bpm_spine: bool = True
 
 
 def parse_camelot(value):
@@ -276,6 +280,7 @@ def objective(order, s):
         return (0, 0, 0.0, 0.0, 0.0)
     scores = []
     severe = 0
+    hard = 0
     weak = 0
     pain = 0.0
     for i in range(len(order) - 1):
@@ -283,15 +288,22 @@ def objective(order, s):
         pct = sc * 100
         scores.append(sc)
         bpm_diff = d["bpm_diff"]
+        if bpm_diff is not None and bpm_diff > s.bpm_guardrail:
+            hard += 1
+            # Any guardrail violation is a route-planning failure in v0.5.
+            # The penalty rises quickly so a 10-12 BPM cliff is not accepted
+            # merely because the rest of the route has prettier Camelot scores.
+            pain += (bpm_diff - s.bpm_guardrail) ** 2 * 2.0
         if bpm_diff is not None and bpm_diff > s.bpm_guardrail + 4:
             severe += 1
-            # Extra pain for truly absurd tempo jumps.
-            pain += (bpm_diff - (s.bpm_guardrail + 4)) ** 2
+            pain += (bpm_diff - (s.bpm_guardrail + 4)) ** 2 * 4.0
         if pct < s.min_transition_target:
             weak += 1
             pain += (s.min_transition_target - pct) ** 2 / 25.0
-    # Lexicographic: severe jumps -> weak links -> pain -> weakest edge -> total.
-    return (-severe, -weak, -pain, min(scores), sum(scores))
+    # v0.5 lexicographic priority:
+    # catastrophic cliffs -> any guardrail violation -> weak links -> pain ->
+    # weakest edge -> total route quality. BPM practicality truly comes first.
+    return (-severe, -hard, -weak, -pain, min(scores), sum(scores))
 
 def _connectivity(tracks, idx, s):
     """How many tempo-practical neighbors does this track have? Lower = orphan."""
@@ -491,6 +503,68 @@ def anchor_first_order(tracks, s):
     return [tracks[i] for i in route]
 
 
+
+def canonical_bpm(track):
+    """Return a practical one-number BPM for whole-playlist geography.
+
+    This is *not* used to score the final transition. It only helps SetFlow
+    build a safe backbone. High double-time values are folded once when that
+    lands them in the normal DJ working range. Pair scoring still uses
+    effective_bpm_pair(), so the final math remains transition-specific.
+    """
+    b = _valid_bpm(track.get("BPM"))
+    if b is None:
+        return None
+    if b >= 160 and 60 <= b / 2.0 <= 160:
+        return b / 2.0
+    return b
+
+
+def bpm_spine_order(tracks, s):
+    """v0.5 bridge planner: create a tempo-safe backbone, then polish it.
+
+    The v0.4 anchor-first route could still consume a crucial bridge and later
+    create a huge cliff (for example 121 -> 104). The BPM spine gives the
+    optimizer at least one candidate whose whole route follows the tempo
+    landscape. Because objective() treats severe BPM cliffs lexicographically,
+    local optimization can improve harmony without re-introducing a disaster.
+    """
+    if len(tracks) <= 2:
+        return list(tracks)
+
+    known = []
+    unknown = []
+    for i, t in enumerate(tracks):
+        cb = canonical_bpm(t)
+        (known if cb is not None else unknown).append((i, cb))
+
+    # If BPM is mostly unavailable, this candidate adds no value.
+    if len(known) < 2:
+        return list(tracks)
+
+    asc_idx = [i for i, _ in sorted(known, key=lambda x: x[1])]
+    desc_idx = list(reversed(asc_idx))
+
+    # Place unknown-BPM tracks last in this *candidate*; other builders will
+    # usually provide a better route when metadata is incomplete.
+    unknown_idx = [i for i, _ in unknown]
+    choices = [asc_idx + unknown_idx, desc_idx + unknown_idx]
+
+    # Honor explicit locks without throwing away the rest of the spine.
+    fixed = []
+    for idxs in choices:
+        route = list(idxs)
+        if s.lock_first and 0 in route:
+            route.remove(0)
+            route.insert(0, 0)
+        if s.lock_last and len(tracks) - 1 in route:
+            last = len(tracks) - 1
+            route.remove(last)
+            route.append(last)
+        fixed.append(route)
+
+    return [tracks[i] for i in max(fixed, key=lambda idxs: objective([tracks[j] for j in idxs], s))]
+
 def insertion_order(tracks, s):
     """Orphan-first cheapest insertion route to reduce end-of-playlist leftovers."""
     n = len(tracks)
@@ -678,6 +752,8 @@ def optimize(tracks, s: Settings):
         use_insertion = True
 
     candidates = [anchor_first_order(tracks, s)]
+    if s.bpm_spine:
+        candidates.append(bpm_spine_order(tracks, s))
     if use_insertion:
         candidates.append(insertion_order(tracks, s))
 
