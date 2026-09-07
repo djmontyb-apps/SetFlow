@@ -1,9 +1,9 @@
 import io
 import pandas as pd
 import streamlit as st
-from optimizer import Settings, optimize, energy_arc_details, energy_zone_labels, artist_spacing_stats
+from optimizer import Settings, optimize, energy_arc_details, energy_zone_labels, artist_spacing_stats, vibe_program_details
 
-st.set_page_config(page_title="SetFlow v0.7", page_icon="🎚️", layout="wide")
+st.set_page_config(page_title="SetFlow v0.8", page_icon="🎚️", layout="wide")
 
 st.markdown("""
 <style>
@@ -14,7 +14,7 @@ h1 {letter-spacing: -0.04em;}
 """, unsafe_allow_html=True)
 
 st.title("🎚️ SetFlow")
-st.caption("v0.7 • Mixing Brain + Programming Brain: Energy Zones + stronger artist spacing.")
+st.caption("v0.8 • Mixing Brain + Programming Brain + Vibe Polish.")
 
 uploaded = st.file_uploader("Upload a playlist", type=["xlsx", "xls", "csv"])
 
@@ -73,6 +73,16 @@ with st.sidebar:
     )
     artist_penalty = {"Off": 0.0, "Light": 0.04, "Normal": 0.08, "Strong": 0.14}[artist_rule]
 
+    st.subheader("Vibe Polish")
+    vibe_mode = st.segmented_control("Danceability + Valence", ["Off", "Light", "Normal"], default="Light")
+    vibe_defaults = {"Off": (0, 0), "Light": (5, 5), "Normal": (10, 8)}
+    dv, vv = vibe_defaults.get(vibe_mode, (5, 5))
+    danceability_influence = st.slider("Danceability influence", 0, 15, dv, 1,
+        help="Softly favors a stable dance-floor groove and stronger danceability in Build/Peak zones.") / 100.0
+    valence_influence = st.slider("Valence influence", 0, 15, vv, 1,
+        help="Softly avoids abrupt happy/dark mood whiplash. It never outranks BPM safety.") / 100.0
+    st.caption("Optional metadata: if a column is missing, SetFlow simply treats it as neutral.")
+
     depth = st.selectbox("Optimization depth", ["Quick", "Standard", "Deep"], index=1)
     lock_first = st.checkbox("Lock first track", value=False)
     lock_last = st.checkbox("Lock last track", value=False)
@@ -113,6 +123,13 @@ if uploaded:
     if suspicious_energy.any():
         st.info(f"{int(suspicious_energy.sum())} track(s) have missing/suspicious Energy values. SetFlow treats those as neutral instead of literal zero.")
 
+    optional = [c for c in ["Danceability", "Valence", "Popularity"] if c in df.columns]
+    missing_optional = [c for c in ["Danceability", "Valence"] if c not in df.columns]
+    if optional:
+        st.caption("Metadata ready: " + " • ".join(optional))
+    if missing_optional and vibe_mode != "Off":
+        st.caption("Vibe Polish note: " + ", ".join(missing_optional) + " missing — neutral scoring will be used.")
+
     if st.button("⚡ Optimize playlist", type="primary", width="stretch"):
         records = df.to_dict(orient="records")
         settings = Settings(
@@ -129,6 +146,8 @@ if uploaded:
             energy_arc=energy_arc,
             energy_arc_influence=energy_arc_influence,
             artist_spacing=artist_penalty,
+            danceability_influence=danceability_influence,
+            valence_influence=valence_influence,
             depth=depth,
             lock_first=lock_first,
             lock_last=lock_last,
@@ -155,17 +174,19 @@ if uploaded:
         bpm_diffs = [t["bpm_diff"] for t in transitions if t["bpm_diff"] is not None]
         max_bpm_diff = max(bpm_diffs) if bpm_diffs else 0.0
         arc = energy_arc_details(ordered, settings)
+        vibe = vibe_program_details(ordered, settings)
         adjacent_artist, near_artist = artist_spacing_stats(ordered)
 
         st.success("Optimization complete.")
-        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+        c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
         c1.metric("Average transition", f"{avg_score:.1f}/100")
         c2.metric("Great transitions", great)
         c3.metric("Weak transitions", weak)
         c4.metric("Hard BPM jumps", bad_bpm)
         c5.metric("Worst BPM Δ", f"{max_bpm_diff:.1f}")
         c6.metric("Programming", f"{arc['score']:.1f}/100")
-        c7.metric("Artist collisions", adjacent_artist)
+        c7.metric("Vibe polish", f"{vibe['score']:.1f}/100")
+        c8.metric("Artist collisions", adjacent_artist)
 
         if energy_arc != "Off":
             st.caption(
@@ -178,11 +199,21 @@ if uploaded:
         elif weak == 0:
             st.info("No transitions fell below your minimum target. Nice route.")
 
+        qualities = pd.Series([t["quality"] for t in transitions]).value_counts().to_dict()
+        st.caption("Route quality: " + " • ".join([
+            f"Excellent {qualities.get('Excellent', 0)}",
+            f"Good {qualities.get('Good', 0)}",
+            f"DJ Workable {qualities.get('DJ Workable', 0)}",
+            f"BPM Escape {qualities.get('BPM Escape', 0)}",
+            f"Weak {qualities.get('Weak', 0)}",
+        ]))
+
         st.subheader("Optimized running order")
-        show_cols = [
-            "SetFlow #", "Title", "Artist", "BPM", "Camelot Key", "Energy", "Program Zone",
-            "Transition Score", "Transition Quality", "Transition Reason", "Effective BPM Δ"
-        ]
+        show_cols = ["SetFlow #", "Title", "Artist", "BPM", "Camelot Key", "Energy"]
+        for col in ["Danceability", "Valence"]:
+            if col in out.columns:
+                show_cols.append(col)
+        show_cols += ["Program Zone", "Transition Score", "Transition Quality", "Transition Reason", "Effective BPM Δ"]
         st.dataframe(out[show_cols], width="stretch", hide_index=True)
 
         with st.expander("Transition details"):
@@ -209,7 +240,7 @@ if uploaded:
         st.download_button(
             "Download optimized CSV",
             csv_bytes,
-            file_name="SetFlow_v0.7_optimized_playlist.csv",
+            file_name="SetFlow_v0.8_optimized_playlist.csv",
             mime="text/csv",
             width="stretch"
         )
@@ -220,7 +251,7 @@ if uploaded:
         st.download_button(
             "Download optimized Excel",
             xbuf.getvalue(),
-            file_name="SetFlow_v0.7_optimized_playlist.xlsx",
+            file_name="SetFlow_v0.8_optimized_playlist.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             width="stretch"
         )

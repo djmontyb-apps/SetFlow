@@ -23,6 +23,10 @@ class Settings:
     # forcing a mathematically smooth curve. BPM safety always has veto power.
     energy_arc: str = "Party Zones"  # Off | Smooth | Build Zones | Party Zones
     energy_arc_influence: float = 0.25
+    # v0.8 Vibe Polish: optional soft programming metadata. These never outrank
+    # BPM safety, weak-link protection, Energy Zones, or artist spacing.
+    danceability_influence: float = 0.05
+    valence_influence: float = 0.05
     depth: str = "Standard"       # Quick | Standard | Deep
     lock_first: bool = False
     lock_last: bool = False
@@ -409,6 +413,89 @@ def energy_arc_details(order, s):
     }
 
 
+
+
+def _clean_percent(value):
+    """Return a 0..100 metadata value or None for missing/suspicious data."""
+    try:
+        x = float(value)
+        if not math.isfinite(x) or x < 0 or x > 100:
+            return None
+        return x
+    except Exception:
+        return None
+
+
+def _neutralized_values(order, field, default=50.0):
+    vals = [_clean_percent(t.get(field)) for t in order]
+    usable = sorted(v for v in vals if v is not None)
+    if not usable:
+        return [default] * len(order), True
+    mid = usable[len(usable)//2]
+    return [mid if v is None else v for v in vals], any(v is None for v in vals)
+
+
+def vibe_program_score(order, s):
+    """Soft Danceability + Valence programming score, 0..1.
+
+    Danceability rewards a stable floor groove with a modest lift into Build/Peak.
+    Valence is intentionally looser: it favors emotional coherence inside a zone
+    rather than forcing a happy/sad storyline. Missing data is neutral.
+    """
+    if len(order) < 2:
+        return 1.0
+    dw = max(0.0, min(0.20, getattr(s, "danceability_influence", 0.0)))
+    vw = max(0.0, min(0.20, getattr(s, "valence_influence", 0.0)))
+    if dw + vw <= 0:
+        return 1.0
+
+    dance, _ = _neutralized_values(order, "Danceability")
+    valence, _ = _neutralized_values(order, "Valence")
+    dance_sorted = sorted(dance)
+
+    dance_pen = []
+    val_pen = []
+    for i in range(len(order)):
+        zone = energy_zone_for_position(i, len(order), getattr(s, "energy_arc", "Party Zones"))[0]
+        # Danceability: broad zone ranges expressed as playlist-relative percentiles.
+        p = _energy_percentile(dance[i], dance_sorted)
+        if zone == "Warm-up":
+            lo, hi = 0.15, 0.72
+        elif zone == "Groove":
+            lo, hi = 0.30, 0.82
+        elif zone == "Build":
+            lo, hi = 0.42, 0.92
+        elif zone == "Peak":
+            lo, hi = 0.55, 1.00
+        else:
+            lo, hi = 0.25, 0.88
+        dance_pen.append(0.0 if lo <= p <= hi else min(1.0, (lo-p if p < lo else p-hi)/0.35))
+
+        # Valence: only discourage abrupt emotional whiplash between neighbors.
+        if i == 0:
+            val_pen.append(0.0)
+        else:
+            delta = abs(valence[i] - valence[i-1])
+            val_pen.append(0.0 if delta <= 18 else min(1.0, (delta - 18) / 45.0))
+
+    dscore = 1.0 - sum(dance_pen)/max(len(dance_pen),1)
+    vscore = 1.0 - sum(val_pen)/max(len(val_pen),1)
+    return (dscore * dw + vscore * vw) / max(dw + vw, 1e-9)
+
+
+def vibe_program_details(order, s):
+    dance, dmiss = _neutralized_values(order, "Danceability")
+    valence, vmiss = _neutralized_values(order, "Valence")
+    return {
+        "score": round(vibe_program_score(order, s) * 100, 1),
+        "dance_start": round(dance[0], 1) if dance else None,
+        "dance_peak": round(max(dance), 1) if dance else None,
+        "valence_start": round(valence[0], 1) if valence else None,
+        "valence_finish": round(valence[-1], 1) if valence else None,
+        "missing": bool(dmiss or vmiss),
+    }
+
+
 def objective(order, s):
     """v0.3 whole-set objective: protect the weakest links first.
 
@@ -447,7 +534,11 @@ def objective(order, s):
     arc = energy_zone_score(order, s)
     arc_weight = max(0.0, min(1.0, getattr(s, "energy_arc_influence", 0.25)))
     # Keep the arc term bounded so it refines rather than overwhelms mixing quality.
-    programmed = arc * arc_weight + (sum(scores) / len(scores)) * (1.0 - arc_weight)
+    base_mix = sum(scores) / len(scores)
+    programmed = arc * arc_weight + base_mix * (1.0 - arc_weight)
+    vibe_w = max(0.0, min(0.20, getattr(s, "danceability_influence", 0.0) + getattr(s, "valence_influence", 0.0)))
+    if vibe_w > 0:
+        programmed = programmed * (1.0 - vibe_w) + vibe_program_score(order, s) * vibe_w
     return (-severe, -hard, -weak, -adjacent_artist, -near_artist, -pain, programmed, min(scores), sum(scores))
 
 def _connectivity(tracks, idx, s):
@@ -880,6 +971,7 @@ def _route_program_stats(order, s):
         "avg": sum(scores)/max(len(scores),1),
         "minimum": min(scores) if scores else 100.0,
         "arc": energy_zone_score(order, s) * 100.0,
+        "vibe": vibe_program_score(order, s) * 100.0,
         "adjacent_artist": artist_spacing_stats(order)[0],
         "near_artist": artist_spacing_stats(order)[1],
     }
@@ -919,7 +1011,8 @@ def program_energy_arc(order, s):
                     continue
                 if st["avg"] < base["avg"] - loss_budget:
                     continue
-                gain = (st["arc"] - base["arc"]) + 0.15 * (st["avg"] - base["avg"])
+                vibe_weight = min(0.35, getattr(s, "danceability_influence", 0.0) + getattr(s, "valence_influence", 0.0))
+                gain = (st["arc"] - base["arc"]) + vibe_weight * (st["vibe"] - base["vibe"]) + 0.15 * (st["avg"] - base["avg"])
                 if gain > best_gain + 0.05:
                     best_gain = gain
                     best_move = (cand, st)
@@ -941,7 +1034,8 @@ def program_energy_arc(order, s):
                     continue
                 if st["avg"] < base["avg"] - loss_budget:
                     continue
-                gain = (st["arc"] - base["arc"]) + 0.15 * (st["avg"] - base["avg"])
+                vibe_weight = min(0.35, getattr(s, "danceability_influence", 0.0) + getattr(s, "valence_influence", 0.0))
+                gain = (st["arc"] - base["arc"]) + vibe_weight * (st["vibe"] - base["vibe"]) + 0.15 * (st["avg"] - base["avg"])
                 if gain > best_gain + 0.05:
                     best_gain = gain
                     best_move = (cand, st)
