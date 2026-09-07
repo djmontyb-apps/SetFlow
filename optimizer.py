@@ -24,7 +24,9 @@ class Settings:
     lock_last: bool = False
     seed: int = 42
     # v0.3: whole-set rescue controls. Bad links matter more than small average gains.
-    rescue_passes: int = 4
+    rescue_passes: int = 6
+    # v0.4: plan around tempo outliers before building the easy middle.
+    anchor_neighbor_count: int = 2
 
 
 def parse_camelot(value):
@@ -376,6 +378,119 @@ def greedy_order(tracks, s, start_index=None):
     return [tracks[i] for i in order_idx]
 
 
+def transition_quality(detail, s):
+    """Human DJ-oriented quality label for a finished transition."""
+    score = float(detail.get("score", 0))
+    diff = detail.get("bpm_diff")
+    zone = detail.get("bpm_zone")
+    if zone == "BPM Incompatible" or (diff is not None and diff > s.bpm_guardrail + 4):
+        return "Weak"
+    if detail.get("reason") == "BPM Escape":
+        return "BPM Escape"
+    if score >= 90:
+        return "Excellent"
+    if score >= 80:
+        return "Good"
+    if score >= s.min_transition_target:
+        return "DJ Workable"
+    return "Weak"
+
+
+def anchor_first_order(tracks, s):
+    """v0.4 route builder: reserve practical neighbors for tempo islands first.
+
+    The hard-to-place tracks are handled before the easy, highly connected tracks.
+    For each anchor we reserve its best unused BPM-practical neighbor, creating
+    small blocks. Blocks are then merged by the best whole-set objective rather
+    than allowing the easy middle of the playlist to consume all useful bridges.
+    """
+    n = len(tracks)
+    if n <= 2:
+        return list(tracks)
+
+    conn = [_connectivity(tracks, i, s) for i in range(n)]
+    # Lowest practical degree first; quality breaks ties.
+    anchors = sorted(range(n), key=lambda i: (conn[i][0], conn[i][1]))
+    unused = set(range(n))
+    blocks = []
+
+    def pair_value(i, j):
+        sc, d = transition_score(tracks[i], tracks[j], s)
+        diff = d["bpm_diff"] if d["bpm_diff"] is not None else 999.0
+        # BPM practicality dominates reservation; harmony breaks close calls.
+        practical = 1 if diff <= s.bpm_guardrail else 0
+        return (practical, -diff, sc)
+
+    for a in anchors:
+        if a not in unused:
+            continue
+        unused.remove(a)
+        candidates = [j for j in unused]
+        if not candidates:
+            blocks.append([a])
+            continue
+        best = max(candidates, key=lambda j: pair_value(a, j))
+        _, d = transition_score(tracks[a], tracks[best], s)
+        # Reserve a neighbor only if it is genuinely useful. Otherwise leave the
+        # anchor single so cluster merging can find the least-bad bridge globally.
+        if d["bpm_diff"] is not None and d["bpm_diff"] <= s.bpm_guardrail + 4:
+            unused.remove(best)
+            # Choose direction that leaves the more connected endpoint outward.
+            ab = [a, best]
+            ba = [best, a]
+            blocks.append(max((ab, ba), key=lambda b: objective([tracks[x] for x in b], s)))
+        else:
+            blocks.append([a])
+
+    for i in sorted(unused):
+        blocks.append([i])
+
+    # Respect locked opener/closer by separating those singleton constraints.
+    if s.lock_first:
+        for b in list(blocks):
+            if 0 in b:
+                b.remove(0)
+                if not b:
+                    blocks.remove(b)
+                break
+        route = [0]
+    else:
+        # Begin with the most difficult block so it cannot become a tail orphan.
+        seed_i = min(range(len(blocks)), key=lambda bi: min((conn[x][0], conn[x][1]) for x in blocks[bi]))
+        route = blocks.pop(seed_i)
+
+    locked_last = n - 1 if s.lock_last else None
+    if locked_last is not None:
+        for b in list(blocks):
+            if locked_last in b:
+                b.remove(locked_last)
+                if not b:
+                    blocks.remove(b)
+                break
+
+    # Merge one block at a time. Try both orientations and every insertion point;
+    # evaluate the complete partial route with worst-link-first objective.
+    while blocks:
+        best_choice = None
+        best_obj = None
+        for bi, block in enumerate(blocks):
+            orientations = [block] if len(block) == 1 else [block, list(reversed(block))]
+            for orient in orientations:
+                lo = 1 if s.lock_first else 0
+                for pos in range(lo, len(route) + 1):
+                    cand = route[:pos] + orient + route[pos:]
+                    obj = objective([tracks[x] for x in cand], s)
+                    if best_obj is None or obj > best_obj:
+                        best_obj = obj
+                        best_choice = (bi, cand)
+        bi, route = best_choice
+        blocks.pop(bi)
+
+    if locked_last is not None:
+        route = [x for x in route if x != locked_last] + [locked_last]
+    return [tracks[i] for i in route]
+
+
 def insertion_order(tracks, s):
     """Orphan-first cheapest insertion route to reduce end-of-playlist leftovers."""
     n = len(tracks)
@@ -562,7 +677,7 @@ def optimize(tracks, s: Settings):
         local_iters = min(3500, max(900, 18 * n))
         use_insertion = True
 
-    candidates = []
+    candidates = [anchor_first_order(tracks, s)]
     if use_insertion:
         candidates.append(insertion_order(tracks, s))
 
@@ -589,4 +704,6 @@ def optimize(tracks, s: Settings):
         _, detail = transition_score(best[i], best[i + 1], s)
         transitions.append(detail)
     transitions = _mark_escape_reasons(best, transitions, s)
+    for detail in transitions:
+        detail["quality"] = transition_quality(detail, s)
     return best, transitions

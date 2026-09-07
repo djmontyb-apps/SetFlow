@@ -3,7 +3,7 @@ import pandas as pd
 import streamlit as st
 from optimizer import Settings, optimize
 
-st.set_page_config(page_title="SetFlow v0.3", page_icon="🎚️", layout="wide")
+st.set_page_config(page_title="SetFlow v0.4", page_icon="🎚️", layout="wide")
 
 st.markdown("""
 <style>
@@ -14,7 +14,7 @@ h1 {letter-spacing: -0.04em;}
 """, unsafe_allow_html=True)
 
 st.title("🎚️ SetFlow")
-st.caption("v0.3 • Mixable first. Harmonic second. Make the whole set flow.")
+st.caption("v0.4 • Mixable first. Harmonic second. Make the whole set flow.")
 
 uploaded = st.file_uploader("Upload a playlist", type=["xlsx", "xls", "csv"])
 
@@ -96,7 +96,7 @@ if uploaded:
     energy_num = pd.to_numeric(df["Energy"], errors="coerce")
     suspicious_energy = energy_num.isna() | (energy_num <= 0) | (energy_num > 100)
     if suspicious_energy.any():
-        st.info(f"{int(suspicious_energy.sum())} track(s) have missing/suspicious Energy values. SetFlow v0.3 treats those as neutral instead of literal zero.")
+        st.info(f"{int(suspicious_energy.sum())} track(s) have missing/suspicious Energy values. SetFlow v0.4 treats those as neutral instead of literal zero.")
 
     if st.button("⚡ Optimize playlist", type="primary", width="stretch"):
         records = df.to_dict(orient="records")
@@ -124,6 +124,7 @@ if uploaded:
 
         out["Transition Score"] = [None] + [t["score"] for t in transitions]
         out["Transition Reason"] = ["OPEN"] + [t["reason"] for t in transitions]
+        out["Transition Quality"] = ["OPEN"] + [t["quality"] for t in transitions]
         out["Camelot Move"] = [None] + [t["camelot_relationship"] for t in transitions]
         out["Effective BPM Δ"] = [None] + [t["bpm_diff"] for t in transitions]
 
@@ -148,7 +149,7 @@ if uploaded:
         st.subheader("Optimized running order")
         show_cols = [
             "SetFlow #", "Title", "Artist", "BPM", "Camelot Key", "Energy",
-            "Transition Score", "Transition Reason", "Effective BPM Δ"
+            "Transition Score", "Transition Quality", "Transition Reason", "Effective BPM Δ"
         ]
         st.dataframe(out[show_cols], width="stretch", hide_index=True)
 
@@ -159,6 +160,7 @@ if uploaded:
                     "From": ordered[i]["Title"],
                     "To": ordered[i + 1]["Title"],
                     "Score": t["score"],
+                    "Quality": t["quality"],
                     "Reason": t["reason"],
                     "Camelot move": t["camelot_relationship"],
                     "BPM zone": t["bpm_zone"],
@@ -175,7 +177,7 @@ if uploaded:
         st.download_button(
             "Download optimized CSV",
             csv_bytes,
-            file_name="SetFlow_v0.3_optimized_playlist.csv",
+            file_name="SetFlow_v0.4_optimized_playlist.csv",
             mime="text/csv",
             width="stretch"
         )
@@ -186,14 +188,14 @@ if uploaded:
         st.download_button(
             "Download optimized Excel",
             xbuf.getvalue(),
-            file_name="SetFlow_v0.3_optimized_playlist.xlsx",
+            file_name="SetFlow_v0.4_optimized_playlist.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             width="stretch"
         )
 else:
     st.info("Upload the Salsa spreadsheet we built, or any CSV/XLSX with Title, Artist, BPM, Camelot Key, and Energy.")
     st.markdown("""
-**What changed in SetFlow v0.3**
+**What changed in SetFlow v0.4**
 
 - **Anti-garbage-pile rescue:** SetFlow targets the weakest transitions and tries moving those tracks earlier into better BPM neighborhoods.
 - **Worst-link-first scoring:** one disastrous transition now hurts more than several small score improvements can help.
