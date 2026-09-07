@@ -10,7 +10,7 @@ from optimizer import (
     vibe_program_details,
 )
 
-st.set_page_config(page_title="SetFlow 1.0", page_icon="🎚️", layout="wide")
+st.set_page_config(page_title="SetFlow 1.0.1", page_icon="🎚️", layout="wide")
 
 st.markdown(
     """
@@ -37,11 +37,34 @@ div[data-testid="stButton"] button[kind="primary"] {font-weight:700; min-height:
 )
 
 
+def normalize_columns(df):
+    """Accept common playlist-export header variants without changing the optimizer schema."""
+    aliases = {
+        "title": "Title",
+        "artist": "Artist",
+        "bpm": "BPM",
+        "camelot key": "Camelot Key",
+        "camelot": "Camelot Key",
+        "energy": "Energy",
+        "dance": "Danceability",
+        "danceability": "Danceability",
+        "valence": "Valence",
+        "pop.": "Popularity",
+        "pop": "Popularity",
+        "popularity": "Popularity",
+    }
+    df = df.copy()
+    df.columns = [aliases.get(str(c).strip().lower(), str(c).strip()) for c in df.columns]
+    return df
+
+
 def load_playlist(file):
     name = file.name.lower()
     if name.endswith(".csv"):
-        return pd.read_csv(file)
-    return pd.read_excel(file)
+        df = pd.read_csv(file)
+    else:
+        df = pd.read_excel(file)
+    return normalize_columns(df)
 
 
 def set_health(avg_score, weak, hard_bpm, max_bpm_diff, adjacent_artist, programming):
@@ -57,7 +80,7 @@ def set_health(avg_score, weak, hard_bpm, max_bpm_diff, adjacent_artist, program
 
 
 with st.sidebar:
-    st.markdown("### 🎚️ SetFlow 1.0")
+    st.markdown("### 🎚️ SetFlow 1.0.1")
     st.caption("Whole-set DJ sequencing")
 
     mode = st.segmented_control("Preset", ["Smooth", "Balanced", "Harmonic"], default="Balanced")
