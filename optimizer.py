@@ -8,7 +8,7 @@ CAMELOT_RE = re.compile(r"^\s*(1[0-2]|[1-9])([AB])\s*$", re.I)
 
 @dataclass
 class Settings:
-    # BPM is a guardrail in v0.2. key_weight is preference *inside* a mixable tempo zone.
+    # BPM is a guardrail. key_weight is preference *inside* a mixable tempo zone.
     key_weight: float = 0.60
     bpm_weight: float = 0.40
     bpm_tolerance: float = 4.0
@@ -19,11 +19,11 @@ class Settings:
     energy_influence: float = 0.15
     artist_spacing: float = 0.08
     energy_mode: str = "Smooth"   # Smooth | Build (adjacent-track behavior)
-    # v0.7 Programming Brain: program the set in broad Energy Zones rather than
+    # Programming Brain: program the set in broad Energy Zones rather than
     # forcing a mathematically smooth curve. BPM safety always has veto power.
     energy_arc: str = "Party Zones"  # Off | Smooth | Build Zones | Party Zones
     energy_arc_influence: float = 0.25
-    # v0.9 Vibe Tie-Breaker: Danceability + Valence only decide between
+    # Vibe Tie-Breaker: Danceability + Valence only decide between
     # otherwise-near-equivalent safe routes. They no longer dilute the main
     # whole-set objective.
     danceability_influence: float = 0.05
@@ -34,11 +34,11 @@ class Settings:
     lock_first: bool = False
     lock_last: bool = False
     seed: int = 42
-    # v0.3: whole-set rescue controls. Bad links matter more than small average gains.
+    # Whole-set rescue controls. Bad links matter more than small average gains.
     rescue_passes: int = 6
-    # v0.4: plan around tempo outliers before building the easy middle.
+    # Plan around tempo outliers before building the easy middle.
     anchor_neighbor_count: int = 2
-    # v0.5: build a BPM spine candidate so tempo islands are connected before
+    # Build a BPM spine candidate so tempo islands are connected before
     # harmonic optimization. This prevents the optimizer from spending every
     # useful bridge and leaving a 15-40 BPM cliff near the end.
     bpm_spine: bool = True
@@ -395,7 +395,7 @@ def artist_spacing_stats(order):
 
 
 def energy_arc_score(order, s):
-    """Compatibility wrapper: v0.7 scores broad programming zones."""
+    """Compatibility wrapper for broad Energy Zone scoring."""
     return energy_zone_score(order, s)
 
 
@@ -529,7 +529,7 @@ def objective(order, s):
         if pct < s.min_transition_target:
             weak += 1
             pain += (s.min_transition_target - pct) ** 2 / 25.0
-    # v0.7 lexicographic priority:
+    # Whole-set lexicographic priority:
     # catastrophic cliffs -> guardrail violations -> weak links -> adjacent artist
     # collisions -> near artist repeats -> transition pain -> programming zones.
     # This makes artist separation a real DJ rule while never outranking BPM safety.
@@ -539,7 +539,7 @@ def objective(order, s):
     # Keep the arc term bounded so it refines rather than overwhelms mixing quality.
     base_mix = sum(scores) / len(scores)
     programmed = arc * arc_weight + base_mix * (1.0 - arc_weight)
-    # v0.9: Vibe Polish is deliberately *not* blended into the core objective.
+    # Vibe Polish is deliberately *not* blended into the core objective.
     # Danceability/Valence are handled later as tie-breakers among routes that
     # are already effectively equivalent on BPM safety, weak links, artist
     # spacing, transition quality, and Energy Zones.
@@ -982,7 +982,7 @@ def _route_program_stats(order, s):
 
 
 def program_energy_arc(order, s):
-    """v0.7 post-pass: improve Energy Zones without breaking the Mixing Brain.
+    """Improve Energy Zones without breaking the Mixing Brain.
 
     The route may breathe inside each section; we are programming broad phases,
     not drawing a perfect line. Artist collisions are also protected here.
@@ -1049,7 +1049,7 @@ def program_energy_arc(order, s):
 
 
 def rescue_artist_spacing(order, s):
-    """v0.7 final programming pass: eliminate avoidable artist collisions.
+    """Final programming pass: eliminate avoidable artist collisions.
 
     No move may worsen severe/hard BPM counts or weak-transition count. Within
     that safe envelope, fewer adjacent repeats wins first, then fewer two-away
@@ -1096,7 +1096,7 @@ def rescue_artist_spacing(order, s):
 
 
 def polish_vibe_tiebreak(order, s):
-    """v0.9 post-pass: use Danceability + Valence only as a tie-breaker.
+    """Use Danceability + Valence only as a tie-breaker.
 
     A candidate must stay in the exact same BPM-safety/weak-link/artist envelope,
     remain within a very small average-transition window, and keep Energy Zone
@@ -1171,6 +1171,81 @@ def polish_vibe_tiebreak(order, s):
         best, base = choice
     return best
 
+
+def polish_weak_transitions(order, s):
+    """Final v1 cleanup: improve the weakest remaining link without undoing the set.
+
+    Programming and vibe passes can occasionally leave a harmonically ugly but
+    tempo-safe edge. This pass searches swaps/relocations and accepts a move only
+    when BPM safety and artist spacing stay intact. Energy/vibe programming may
+    move only a tiny amount, while fewer weak links or a healthier minimum score
+    wins decisively.
+    """
+    if len(order) < 4:
+        return list(order)
+
+    best = list(order)
+    base = _route_program_stats(best, s)
+    if base["weak"] == 0 and base["minimum"] >= s.min_transition_target + 5:
+        return best
+
+    passes = 1 if s.depth == "Quick" else (3 if s.depth == "Standard" else 5)
+    lo = 1 if s.lock_first else 0
+    hi = len(best) - 1 if s.lock_last else len(best)
+
+    def eligible(st):
+        if st["severe"] > base["severe"] or st["hard"] > base["hard"]:
+            return False
+        if st["adjacent_artist"] > base["adjacent_artist"] or st["near_artist"] > base["near_artist"]:
+            return False
+        if st["arc"] < base["arc"] - 2.5:
+            return False
+        if st["vibe"] < base["vibe"] - 2.5:
+            return False
+        # Do not buy a prettier weakest link by materially degrading the set.
+        if st["avg"] < base["avg"] - 1.25:
+            return False
+        return True
+
+    for _ in range(passes):
+        choice = None
+        # fewer weak links first, then highest floor, then average/arc/vibe
+        best_key = (-base["weak"], base["minimum"], base["avg"], base["arc"], base["vibe"])
+
+        for i in range(lo, hi):
+            for j in range(i + 1, hi):
+                cand = list(best)
+                cand[i], cand[j] = cand[j], cand[i]
+                st = _route_program_stats(cand, s)
+                if not eligible(st):
+                    continue
+                key = (-st["weak"], st["minimum"], st["avg"], st["arc"], st["vibe"])
+                if key > best_key:
+                    best_key = key
+                    choice = (cand, st)
+
+        for i in range(lo, hi):
+            for j in range(lo, hi + 1):
+                if i == j or i + 1 == j:
+                    continue
+                cand = list(best)
+                tr = cand.pop(i)
+                dest = j if j < i else j - 1
+                cand.insert(max(lo, min(dest, len(cand))), tr)
+                st = _route_program_stats(cand, s)
+                if not eligible(st):
+                    continue
+                key = (-st["weak"], st["minimum"], st["avg"], st["arc"], st["vibe"])
+                if key > best_key:
+                    best_key = key
+                    choice = (cand, st)
+
+        if choice is None:
+            break
+        best, base = choice
+
+    return best
+
 def _mark_escape_reasons(order, transitions, s):
     """Label key-breaking but tempo-practical links as BPM Escape when appropriate."""
     if not s.escape_mode:
@@ -1228,15 +1303,17 @@ def optimize(tracks, s: Settings):
         s.seed = old_seed
 
     best = max(improved, key=lambda o: objective(o, s))
-    # v0.3 rescue pass: explicitly repair the weakest links before finalizing.
+    # Explicitly repair the weakest links before finalizing.
     best = rescue_weak_links(best, s)
-    # v0.7 Programming Brain: reshape the safe route into broad Energy Zones
+    # Programming Brain: reshape the safe route into broad Energy Zones
     # while preserving BPM safety and artist separation.
     best = program_energy_arc(best, s)
     best = rescue_artist_spacing(best, s)
-    # v0.9: only after the route is safe, programmed, and artist-clean do
+    # Only after the route is safe, programmed, and artist-clean do
     # Danceability + Valence get to break near-ties.
     best = polish_vibe_tiebreak(best, s)
+    # v1.0 cleanup: make one last conservative attempt to lift weak links.
+    best = polish_weak_transitions(best, s)
 
     transitions = []
     for i in range(len(best) - 1):
