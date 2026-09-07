@@ -18,7 +18,11 @@ class Settings:
     min_transition_target: float = 60.0
     energy_influence: float = 0.15
     artist_spacing: float = 0.08
-    energy_mode: str = "Smooth"   # Smooth | Build
+    energy_mode: str = "Smooth"   # Smooth | Build (adjacent-track behavior)
+    # v0.6 Programming Brain: shape the whole set using Energy metadata while
+    # keeping BPM safety lexicographically more important than programming.
+    energy_arc: str = "Party Arc"  # Off | Smooth | Build | Party Arc
+    energy_arc_influence: float = 0.25
     depth: str = "Standard"       # Quick | Standard | Deep
     lock_first: bool = False
     lock_last: bool = False
@@ -270,6 +274,87 @@ def _edge(order, i, j, s):
     return transition_score(order[i], order[j], s)[0]
 
 
+
+def _energy_values(order):
+    vals = [_clean_energy(t.get("Energy")) for t in order]
+    usable = [v for v in vals if v is not None]
+    if not usable:
+        return [50.0] * len(order), True
+    usable_sorted = sorted(usable)
+    median = usable_sorted[len(usable_sorted)//2]
+    return [median if v is None else v for v in vals], any(v is None for v in vals)
+
+
+def _quantile(sorted_vals, q):
+    if not sorted_vals:
+        return 50.0
+    q = max(0.0, min(1.0, float(q)))
+    if len(sorted_vals) == 1:
+        return float(sorted_vals[0])
+    pos = q * (len(sorted_vals) - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return float(sorted_vals[lo])
+    f = pos - lo
+    return float(sorted_vals[lo] * (1-f) + sorted_vals[hi] * f)
+
+
+def energy_arc_score(order, s):
+    """Score how well the whole running order follows the selected energy arc.
+
+    This is intentionally a *programming* score, not a transition-safety score.
+    It uses the playlist's own energy distribution, so a Salsa set and a House
+    set can both build naturally without hard-coded universal Energy numbers.
+    Missing/suspicious Energy values are filled with the playlist median.
+    """
+    if len(order) < 2 or getattr(s, "energy_arc", "Off") == "Off":
+        return 1.0
+    vals, _ = _energy_values(order)
+    sorted_vals = sorted(vals)
+    n = len(vals)
+    errors = []
+    mode = getattr(s, "energy_arc", "Party Arc")
+
+    for i, actual in enumerate(vals):
+        x = i / max(n - 1, 1)
+        if mode == "Build":
+            # Low-ish opener to high-energy closer.
+            q = 0.20 + 0.75 * x
+        elif mode == "Smooth":
+            # Gentle rise through the night, avoiding a rigid climb.
+            q = 0.38 + 0.24 * x
+        else:  # Party Arc
+            # Warm-up -> steady build -> peak around 75% -> ease down to a
+            # still-positive finish. Piecewise quantile path, not fixed values.
+            if x <= 0.75:
+                q = 0.20 + (0.78 * (x / 0.75))
+            else:
+                q = 0.98 - (0.38 * ((x - 0.75) / 0.25))
+        target = _quantile(sorted_vals, q)
+        errors.append(abs(actual - target))
+
+    mae = sum(errors) / len(errors)
+    # 0 error = 1.0. A 25-point average miss is already a poor programming arc.
+    return max(0.0, 1.0 - mae / 25.0)
+
+
+def energy_arc_details(order, s):
+    vals, had_missing = _energy_values(order)
+    score = energy_arc_score(order, s)
+    if not vals:
+        return {"score": 100.0, "start": None, "peak": None, "finish": None, "missing": had_missing}
+    peak_i = max(range(len(vals)), key=lambda i: vals[i])
+    return {
+        "score": round(score * 100, 1),
+        "start": round(vals[0], 1),
+        "peak": round(max(vals), 1),
+        "peak_position": peak_i + 1,
+        "finish": round(vals[-1], 1),
+        "missing": had_missing,
+    }
+
+
 def objective(order, s):
     """v0.3 whole-set objective: protect the weakest links first.
 
@@ -300,10 +385,15 @@ def objective(order, s):
         if pct < s.min_transition_target:
             weak += 1
             pain += (s.min_transition_target - pct) ** 2 / 25.0
-    # v0.5 lexicographic priority:
+    # v0.6 lexicographic priority:
     # catastrophic cliffs -> any guardrail violation -> weak links -> pain ->
-    # weakest edge -> total route quality. BPM practicality truly comes first.
-    return (-severe, -hard, -weak, -pain, min(scores), sum(scores))
+    # whole-set Energy Arc -> weakest edge -> total transition quality.
+    # Programming can improve a safe route, but it can never justify a BPM cliff.
+    arc = energy_arc_score(order, s)
+    arc_weight = max(0.0, min(1.0, getattr(s, "energy_arc_influence", 0.25)))
+    # Keep the arc term bounded so it refines rather than overwhelms mixing quality.
+    programmed = arc * arc_weight + (sum(scores) / len(scores)) * (1.0 - arc_weight)
+    return (-severe, -hard, -weak, -pain, programmed, min(scores), sum(scores))
 
 def _connectivity(tracks, idx, s):
     """How many tempo-practical neighbors does this track have? Lower = orphan."""
@@ -715,6 +805,74 @@ def rescue_weak_links(order, s):
     return best
 
 
+
+def _route_program_stats(order, s):
+    severe = hard = weak = 0
+    scores = []
+    for i in range(len(order)-1):
+        sc, d = transition_score(order[i], order[i+1], s)
+        pct = sc * 100.0
+        scores.append(pct)
+        diff = d.get("bpm_diff")
+        if diff is not None and diff > s.bpm_guardrail:
+            hard += 1
+        if diff is not None and diff > s.bpm_guardrail + 4:
+            severe += 1
+        if pct < s.min_transition_target:
+            weak += 1
+    return {
+        "severe": severe, "hard": hard, "weak": weak,
+        "avg": sum(scores)/max(len(scores),1),
+        "minimum": min(scores) if scores else 100.0,
+        "arc": energy_arc_score(order, s) * 100.0,
+    }
+
+
+def program_energy_arc(order, s):
+    """v0.6 post-pass: improve whole-set Energy without breaking mixability.
+
+    The Mixing Brain gets veto power. We only accept programming moves that keep
+    the same counts of severe/hard/weak transitions, keep the average transition
+    within a small budget, and improve the selected Energy Arc. This is a very
+    DJ-like compromise: reshape the night *inside* safe BPM neighborhoods.
+    """
+    if getattr(s, "energy_arc", "Off") == "Off" or len(order) < 4:
+        return list(order)
+    best = list(order)
+    base = _route_program_stats(best, s)
+    # Higher influence permits a little more transition-score sacrifice.
+    loss_budget = 0.75 + 5.0 * max(0.0, min(0.5, getattr(s, "energy_arc_influence", 0.25)))
+    passes = 2 if s.depth == "Quick" else (5 if s.depth == "Standard" else 8)
+
+    for _ in range(passes):
+        best_move = None
+        best_gain = 0.0
+        n = len(best)
+        lo = 1 if s.lock_first else 0
+        hi = n-1 if s.lock_last else n
+
+        # Swaps are ideal for energy programming because they can move a high
+        # energy track later without changing the playlist membership or anchors.
+        for i in range(lo, hi):
+            for j in range(i+1, hi):
+                cand = list(best)
+                cand[i], cand[j] = cand[j], cand[i]
+                st = _route_program_stats(cand, s)
+                if (st["severe"], st["hard"], st["weak"]) != (base["severe"], base["hard"], base["weak"]):
+                    continue
+                if st["avg"] < base["avg"] - loss_budget:
+                    continue
+                gain = (st["arc"] - base["arc"]) + 0.15 * (st["avg"] - base["avg"])
+                if gain > best_gain + 0.05:
+                    best_gain = gain
+                    best_move = (cand, st)
+
+        if best_move is None:
+            break
+        best, base = best_move
+    return best
+
+
 def _mark_escape_reasons(order, transitions, s):
     """Label key-breaking but tempo-practical links as BPM Escape when appropriate."""
     if not s.escape_mode:
@@ -774,6 +932,9 @@ def optimize(tracks, s: Settings):
     best = max(improved, key=lambda o: objective(o, s))
     # v0.3 rescue pass: explicitly repair the weakest links before finalizing.
     best = rescue_weak_links(best, s)
+    # v0.6 Programming Brain: reshape the safe route around the selected Energy
+    # Arc without re-introducing the BPM cliffs v0.5 eliminated.
+    best = program_energy_arc(best, s)
 
     transitions = []
     for i in range(len(best) - 1):

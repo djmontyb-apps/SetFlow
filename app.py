@@ -1,9 +1,9 @@
 import io
 import pandas as pd
 import streamlit as st
-from optimizer import Settings, optimize
+from optimizer import Settings, optimize, energy_arc_details
 
-st.set_page_config(page_title="SetFlow v0.5", page_icon="🎚️", layout="wide")
+st.set_page_config(page_title="SetFlow v0.6", page_icon="🎚️", layout="wide")
 
 st.markdown("""
 <style>
@@ -14,7 +14,7 @@ h1 {letter-spacing: -0.04em;}
 """, unsafe_allow_html=True)
 
 st.title("🎚️ SetFlow")
-st.caption("v0.5 • BPM spine first. Harmonic intelligence on top.")
+st.caption("v0.6 • Mixing Brain + first Programming Brain: Energy Arc.")
 
 uploaded = st.file_uploader("Upload a playlist", type=["xlsx", "xls", "csv"])
 
@@ -49,9 +49,22 @@ with st.sidebar:
                             help="Build a tempo-safe backbone first so bridge tracks are not spent too early.")
     min_target = st.slider("Minimum transition target", 40, 80, 60, 5)
 
-    st.subheader("Flow")
-    energy_mode = st.selectbox("Energy flow", ["Smooth", "Build"], index=0)
-    energy_influence = st.slider("Energy influence", 0, 40, 15, 5) / 100.0
+    st.subheader("Programming Brain")
+    energy_arc = st.selectbox(
+        "Energy Arc",
+        ["Party Arc", "Build", "Smooth", "Off"],
+        index=0,
+        help="Shapes the whole set after BPM safety: Party Arc warms up, builds, peaks late, then eases down."
+    )
+    energy_arc_influence = st.slider(
+        "Energy Arc influence", 0, 50, 25, 5,
+        help="A soft whole-set preference. It cannot override BPM safety."
+    ) / 100.0
+    energy_mode = st.selectbox(
+        "Adjacent-track energy behavior", ["Smooth", "Build"], index=0,
+        help="Controls how much SetFlow prefers similar or gradually rising Energy between neighboring tracks."
+    )
+    energy_influence = st.slider("Adjacent Energy influence", 0, 40, 10, 5) / 100.0
 
     artist_rule = st.select_slider(
         "Artist spacing",
@@ -112,8 +125,10 @@ if uploaded:
             bpm_spine=bpm_spine,
             min_transition_target=float(min_target),
             energy_influence=energy_influence,
-            artist_spacing=artist_penalty,
             energy_mode=energy_mode,
+            energy_arc=energy_arc,
+            energy_arc_influence=energy_arc_influence,
+            artist_spacing=artist_penalty,
             depth=depth,
             lock_first=lock_first,
             lock_last=lock_last,
@@ -138,14 +153,22 @@ if uploaded:
         bad_bpm = sum(1 for t in transitions if t["bpm_zone"] in ("Hard BPM Jump", "BPM Incompatible"))
         bpm_diffs = [t["bpm_diff"] for t in transitions if t["bpm_diff"] is not None]
         max_bpm_diff = max(bpm_diffs) if bpm_diffs else 0.0
+        arc = energy_arc_details(ordered, settings)
 
         st.success("Optimization complete.")
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("Average transition", f"{avg_score:.1f}/100")
         c2.metric("Great transitions", great)
         c3.metric("Weak transitions", weak)
         c4.metric("Hard BPM jumps", bad_bpm)
         c5.metric("Worst BPM Δ", f"{max_bpm_diff:.1f}")
+        c6.metric("Energy Arc", f"{arc['score']:.1f}/100")
+
+        if energy_arc != "Off":
+            st.caption(
+                f"Energy Arc: start {arc['start']} • peak {arc['peak']} at track {arc.get('peak_position', '—')} "
+                f"• finish {arc['finish']} • mode: {energy_arc}"
+            )
 
         if bad_bpm:
             st.warning(f"SetFlow found {bad_bpm} unavoidable hard BPM transition(s). Check the transition details before performing the set.")
@@ -183,7 +206,7 @@ if uploaded:
         st.download_button(
             "Download optimized CSV",
             csv_bytes,
-            file_name="SetFlow_v0.5_optimized_playlist.csv",
+            file_name="SetFlow_v0.6_optimized_playlist.csv",
             mime="text/csv",
             width="stretch"
         )
@@ -194,19 +217,19 @@ if uploaded:
         st.download_button(
             "Download optimized Excel",
             xbuf.getvalue(),
-            file_name="SetFlow_v0.5_optimized_playlist.xlsx",
+            file_name="SetFlow_v0.6_optimized_playlist.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             width="stretch"
         )
 else:
     st.info("Upload the Salsa spreadsheet we built, or any CSV/XLSX with Title, Artist, BPM, Camelot Key, and Energy.")
     st.markdown("""
-**What changed in SetFlow v0.5**
+**What changed in SetFlow v0.6**
 
-- **BPM Bridge Planner:** SetFlow now builds a tempo-safe spine before harmonic polishing, protecting the tracks that connect one BPM neighborhood to another.
-- **No-cliff candidate:** the optimizer always considers a route based on practical normalized BPM geography, including true half/double-time tracks.
-- **Worst-link-first scoring remains:** one disastrous transition matters more than several tiny harmonic gains.
-- Camelot harmony, energy, artist spacing, and BPM Escape still optimize the route once the tempo backbone is safe.
-- The dashboard now shows **Hard BPM jumps** and **Worst BPM Δ** so a bad route cannot hide behind a good average score.
-- Energy Arc is intentionally *not* in this release yet; v0.5 is focused on solving the remaining BPM-island problem cleanly.
+- **Energy Arc:** SetFlow now has its first Programming Brain. The default Party Arc aims for warm-up → build → late peak → ease-down using the playlist's own Energy range.
+- **BPM safety still wins:** Energy programming is only allowed to refine routes that already satisfy the Mixing Brain. It cannot justify a tempo cliff.
+- **Energy Arc score:** the dashboard shows how closely the finished set follows the selected arc, plus start/peak/finish Energy.
+- **Separate controls:** adjacent-track Energy and whole-set Energy Arc are now independent.
+- The v0.5 BPM Bridge Planner, Camelot rules, BPM Escape, artist spacing, and worst-link protection all remain intact.
+- Danceability, Valence, and Popularity are deliberately still waiting; Energy is the first programming variable we are validating.
 """)
