@@ -1,5 +1,5 @@
 
-# SetFlow v0.3
+# SetFlow v0.4
 
 SetFlow is a small Streamlit prototype for DJ playlist sequencing.
 
