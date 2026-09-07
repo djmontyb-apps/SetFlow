@@ -23,10 +23,13 @@ class Settings:
     # forcing a mathematically smooth curve. BPM safety always has veto power.
     energy_arc: str = "Party Zones"  # Off | Smooth | Build Zones | Party Zones
     energy_arc_influence: float = 0.25
-    # v0.8 Vibe Polish: optional soft programming metadata. These never outrank
-    # BPM safety, weak-link protection, Energy Zones, or artist spacing.
+    # v0.9 Vibe Tie-Breaker: Danceability + Valence only decide between
+    # otherwise-near-equivalent safe routes. They no longer dilute the main
+    # whole-set objective.
     danceability_influence: float = 0.05
     valence_influence: float = 0.05
+    vibe_tiebreak_score_window: float = 0.75
+    vibe_tiebreak_arc_window: float = 2.0
     depth: str = "Standard"       # Quick | Standard | Deep
     lock_first: bool = False
     lock_last: bool = False
@@ -536,9 +539,10 @@ def objective(order, s):
     # Keep the arc term bounded so it refines rather than overwhelms mixing quality.
     base_mix = sum(scores) / len(scores)
     programmed = arc * arc_weight + base_mix * (1.0 - arc_weight)
-    vibe_w = max(0.0, min(0.20, getattr(s, "danceability_influence", 0.0) + getattr(s, "valence_influence", 0.0)))
-    if vibe_w > 0:
-        programmed = programmed * (1.0 - vibe_w) + vibe_program_score(order, s) * vibe_w
+    # v0.9: Vibe Polish is deliberately *not* blended into the core objective.
+    # Danceability/Valence are handled later as tie-breakers among routes that
+    # are already effectively equivalent on BPM safety, weak links, artist
+    # spacing, transition quality, and Energy Zones.
     return (-severe, -hard, -weak, -adjacent_artist, -near_artist, -pain, programmed, min(scores), sum(scores))
 
 def _connectivity(tracks, idx, s):
@@ -1011,8 +1015,7 @@ def program_energy_arc(order, s):
                     continue
                 if st["avg"] < base["avg"] - loss_budget:
                     continue
-                vibe_weight = min(0.35, getattr(s, "danceability_influence", 0.0) + getattr(s, "valence_influence", 0.0))
-                gain = (st["arc"] - base["arc"]) + vibe_weight * (st["vibe"] - base["vibe"]) + 0.15 * (st["avg"] - base["avg"])
+                gain = (st["arc"] - base["arc"]) + 0.15 * (st["avg"] - base["avg"])
                 if gain > best_gain + 0.05:
                     best_gain = gain
                     best_move = (cand, st)
@@ -1034,8 +1037,7 @@ def program_energy_arc(order, s):
                     continue
                 if st["avg"] < base["avg"] - loss_budget:
                     continue
-                vibe_weight = min(0.35, getattr(s, "danceability_influence", 0.0) + getattr(s, "valence_influence", 0.0))
-                gain = (st["arc"] - base["arc"]) + vibe_weight * (st["vibe"] - base["vibe"]) + 0.15 * (st["avg"] - base["avg"])
+                gain = (st["arc"] - base["arc"]) + 0.15 * (st["avg"] - base["avg"])
                 if gain > best_gain + 0.05:
                     best_gain = gain
                     best_move = (cand, st)
@@ -1091,6 +1093,83 @@ def rescue_artist_spacing(order, s):
             break
     return best
 
+
+
+def polish_vibe_tiebreak(order, s):
+    """v0.9 post-pass: use Danceability + Valence only as a tie-breaker.
+
+    A candidate must stay in the exact same BPM-safety/weak-link/artist envelope,
+    remain within a very small average-transition window, and keep Energy Zone
+    programming essentially unchanged. Only then may a better vibe score win.
+    This makes the polish visible without ever letting it steer the set.
+    """
+    if len(order) < 4:
+        return list(order)
+    dw = max(0.0, getattr(s, "danceability_influence", 0.0))
+    vw = max(0.0, getattr(s, "valence_influence", 0.0))
+    if dw + vw <= 0:
+        return list(order)
+
+    best = list(order)
+    base = _route_program_stats(best, s)
+    score_window = max(0.0, float(getattr(s, "vibe_tiebreak_score_window", 0.75)))
+    arc_window = max(0.0, float(getattr(s, "vibe_tiebreak_arc_window", 2.0)))
+    passes = 2 if s.depth == "Quick" else (4 if s.depth == "Standard" else 7)
+    lo = 1 if s.lock_first else 0
+    hi = len(best) - 1 if s.lock_last else len(best)
+
+    def eligible(st):
+        if (st["severe"], st["hard"], st["weak"]) != (base["severe"], base["hard"], base["weak"]):
+            return False
+        if (st["adjacent_artist"], st["near_artist"]) != (base["adjacent_artist"], base["near_artist"]):
+            return False
+        if st["avg"] < base["avg"] - score_window:
+            return False
+        if st["minimum"] < base["minimum"] - score_window:
+            return False
+        if st["arc"] < base["arc"] - arc_window:
+            return False
+        return True
+
+    for _ in range(passes):
+        choice = None
+        choice_key = (base["vibe"], base["avg"], base["arc"], base["minimum"])
+        n = len(best)
+
+        # Try swaps first: they are the cleanest true tie-breaker move.
+        for i in range(lo, hi):
+            for j in range(i + 1, hi):
+                cand = list(best)
+                cand[i], cand[j] = cand[j], cand[i]
+                st = _route_program_stats(cand, s)
+                if not eligible(st):
+                    continue
+                key = (st["vibe"], st["avg"], st["arc"], st["minimum"])
+                if key > choice_key and st["vibe"] > base["vibe"] + 0.15:
+                    choice_key = key
+                    choice = (cand, st)
+
+        # Relocation is allowed, but under the exact same tight guardrails.
+        for i in range(lo, hi):
+            for j in range(lo, hi + 1):
+                if i == j or i + 1 == j:
+                    continue
+                cand = list(best)
+                tr = cand.pop(i)
+                dest = j if j < i else j - 1
+                cand.insert(max(lo, min(dest, len(cand))), tr)
+                st = _route_program_stats(cand, s)
+                if not eligible(st):
+                    continue
+                key = (st["vibe"], st["avg"], st["arc"], st["minimum"])
+                if key > choice_key and st["vibe"] > base["vibe"] + 0.15:
+                    choice_key = key
+                    choice = (cand, st)
+
+        if choice is None:
+            break
+        best, base = choice
+    return best
 
 def _mark_escape_reasons(order, transitions, s):
     """Label key-breaking but tempo-practical links as BPM Escape when appropriate."""
@@ -1155,6 +1234,9 @@ def optimize(tracks, s: Settings):
     # while preserving BPM safety and artist separation.
     best = program_energy_arc(best, s)
     best = rescue_artist_spacing(best, s)
+    # v0.9: only after the route is safe, programmed, and artist-clean do
+    # Danceability + Valence get to break near-ties.
+    best = polish_vibe_tiebreak(best, s)
 
     transitions = []
     for i in range(len(best) - 1):

@@ -3,7 +3,7 @@ import pandas as pd
 import streamlit as st
 from optimizer import Settings, optimize, energy_arc_details, energy_zone_labels, artist_spacing_stats, vibe_program_details
 
-st.set_page_config(page_title="SetFlow v0.8", page_icon="🎚️", layout="wide")
+st.set_page_config(page_title="SetFlow v0.9", page_icon="🎚️", layout="wide")
 
 st.markdown("""
 <style>
@@ -14,7 +14,7 @@ h1 {letter-spacing: -0.04em;}
 """, unsafe_allow_html=True)
 
 st.title("🎚️ SetFlow")
-st.caption("v0.8 • Mixing Brain + Programming Brain + Vibe Polish.")
+st.caption("v0.9 • Mixing Brain + Programming Brain + Vibe Tie-Breaker.")
 
 uploaded = st.file_uploader("Upload a playlist", type=["xlsx", "xls", "csv"])
 
@@ -73,15 +73,15 @@ with st.sidebar:
     )
     artist_penalty = {"Off": 0.0, "Light": 0.04, "Normal": 0.08, "Strong": 0.14}[artist_rule]
 
-    st.subheader("Vibe Polish")
+    st.subheader("Vibe Tie-Breaker")
     vibe_mode = st.segmented_control("Danceability + Valence", ["Off", "Light", "Normal"], default="Light")
     vibe_defaults = {"Off": (0, 0), "Light": (5, 5), "Normal": (10, 8)}
     dv, vv = vibe_defaults.get(vibe_mode, (5, 5))
     danceability_influence = st.slider("Danceability influence", 0, 15, dv, 1,
-        help="Softly favors a stable dance-floor groove and stronger danceability in Build/Peak zones.") / 100.0
+        help="Used only to break ties between otherwise-near-equivalent safe routes. Favors a coherent floor groove.") / 100.0
     valence_influence = st.slider("Valence influence", 0, 15, vv, 1,
-        help="Softly avoids abrupt happy/dark mood whiplash. It never outranks BPM safety.") / 100.0
-    st.caption("Optional metadata: if a column is missing, SetFlow simply treats it as neutral.")
+        help="Used only as a tie-breaker to reduce abrupt happy/dark mood whiplash.") / 100.0
+    st.caption("v0.9 rule: vibe can break a tie, but it cannot steer BPM, Camelot, Energy Zones, or artist spacing. Missing metadata stays neutral.")
 
     depth = st.selectbox("Optimization depth", ["Quick", "Standard", "Deep"], index=1)
     lock_first = st.checkbox("Lock first track", value=False)
@@ -128,7 +128,7 @@ if uploaded:
     if optional:
         st.caption("Metadata ready: " + " • ".join(optional))
     if missing_optional and vibe_mode != "Off":
-        st.caption("Vibe Polish note: " + ", ".join(missing_optional) + " missing — neutral scoring will be used.")
+        st.caption("Vibe Tie-Breaker note: " + ", ".join(missing_optional) + " missing — neutral scoring will be used.")
 
     if st.button("⚡ Optimize playlist", type="primary", width="stretch"):
         records = df.to_dict(orient="records")
@@ -185,7 +185,7 @@ if uploaded:
         c4.metric("Hard BPM jumps", bad_bpm)
         c5.metric("Worst BPM Δ", f"{max_bpm_diff:.1f}")
         c6.metric("Programming", f"{arc['score']:.1f}/100")
-        c7.metric("Vibe polish", f"{vibe['score']:.1f}/100")
+        c7.metric("Vibe tie-break", f"{vibe['score']:.1f}/100")
         c8.metric("Artist collisions", adjacent_artist)
 
         if energy_arc != "Off":
@@ -240,7 +240,7 @@ if uploaded:
         st.download_button(
             "Download optimized CSV",
             csv_bytes,
-            file_name="SetFlow_v0.8_optimized_playlist.csv",
+            file_name="SetFlow_v0.9_optimized_playlist.csv",
             mime="text/csv",
             width="stretch"
         )
@@ -251,7 +251,7 @@ if uploaded:
         st.download_button(
             "Download optimized Excel",
             xbuf.getvalue(),
-            file_name="SetFlow_v0.8_optimized_playlist.xlsx",
+            file_name="SetFlow_v0.9_optimized_playlist.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             width="stretch"
         )
